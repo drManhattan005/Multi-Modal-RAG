@@ -1,0 +1,37 @@
+# macOS
+.DS_Store
+.localized
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Editor folders
+.vscode/
+.idea/
+
+# Test / lint / type-check caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Coverage
+.coverage
+htmlcov/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Generated chunk outputs
+output/
+chunks/
+*.jsonl
+
+Visa & Immigration Handbook for Germany - 260807-1.pdf
