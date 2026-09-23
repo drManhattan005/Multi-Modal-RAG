@@ -1,11 +1,7 @@
-from dataclasses import dataclass
+import json
+from pathlib import Path
+
 from pypdf import PdfReader
-
-
-@dataclass(frozen=True)
-class Chunk:
-    kind: str
-    text: str
 
 
 def normalize_text(text: str) -> str:
@@ -52,21 +48,18 @@ def find_heading_index(
 ) -> int | None:
     target = normalize_for_match(heading)
 
-    # Exact normalized line.
     for i in range(start, len(lines)):
         candidate = normalize_for_match(lines[i])
 
         if candidate == target:
             return i
 
-    # Heading merged with nearby extracted text.
     for i in range(start, len(lines)):
         candidate = normalize_for_match(lines[i])
 
         if target in candidate:
             return i
 
-    # Heading split over two extracted lines.
     for i in range(start, len(lines) - 1):
         combined = normalize_for_match(lines[i] + " " + lines[i + 1])
 
@@ -76,7 +69,93 @@ def find_heading_index(
     return None
 
 
-def build_chunks(pdf_path: str) -> list[Chunk]:
+CHUNK_METADATA = {
+    "driver_declaration_intro": {
+        "chunk_id": "driver_declaration_intro",
+        "chunk_kind": "declaration",
+        "section_title": "Driver Declaration",
+        "subsection_title": "Confirmation of Information and Understanding",
+        "topic_tags": [
+            "driver_declaration",
+            "confirmation",
+            "understanding",
+            "employment_responsibilities",
+            "germany",
+        ],
+        "intent_type": "explanation",
+        "entity_tags": [
+            "EuroJobsCenter",
+            "Germany",
+            "EU Code 95",
+            "Driver Card",
+        ],
+        "base_language": "en",
+    },
+    "declaration": {
+        "chunk_id": "driver_declaration_statement",
+        "chunk_kind": "declaration",
+        "section_title": "Driver Declaration",
+        "subsection_title": "Declaration",
+        "topic_tags": [
+            "declaration",
+            "acknowledgement",
+            "voluntary_confirmation",
+            "professional_responsibility",
+        ],
+        "intent_type": "explanation",
+        "entity_tags": [
+            "EuroJobsCenter",
+            "Germany",
+        ],
+        "base_language": "en",
+    },
+    "applicant_information": {
+        "chunk_id": "driver_declaration_applicant_information",
+        "chunk_kind": "checklist",
+        "section_title": "Driver Declaration",
+        "subsection_title": "Applicant Information",
+        "topic_tags": [
+            "applicant_information",
+            "identity_details",
+            "passport_number",
+            "signature",
+            "contact_details",
+        ],
+        "intent_type": "document_checklist",
+        "entity_tags": [
+            "passport",
+        ],
+        "base_language": "en",
+    },
+    "final_message": {
+        "chunk_id": "driver_declaration_final_message",
+        "chunk_kind": "message",
+        "section_title": "Driver Declaration",
+        "subsection_title": "Final Message",
+        "topic_tags": [
+            "final_message",
+            "trust",
+            "professional_support",
+            "journey_to_germany",
+            "career_start",
+        ],
+        "intent_type": "career_guidance",
+        "entity_tags": [
+            "EuroJobsCenter",
+            "Germany",
+        ],
+        "base_language": "en",
+    },
+}
+
+
+def make_chunk(kind: str, text: str) -> dict:
+    metadata = CHUNK_METADATA[kind].copy()
+    metadata["text"] = text
+    return metadata
+
+
+def build_chunks(pdf_path: str) -> list[dict]:
     reader = PdfReader(pdf_path)
 
     raw_text = ""
@@ -120,19 +199,47 @@ def build_chunks(pdf_path: str) -> list[Chunk]:
             end_index = len(lines)
 
         chunk_text = "\n".join(lines[start_index:end_index])
-        chunks.append(Chunk(kind=kind, text=chunk_text))
+        chunks.append(make_chunk(kind, chunk_text))
 
     return chunks
 
 
+def write_jsonl(chunks: list[dict], output_path: str) -> None:
+    output_file = Path(output_path)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with output_file.open("w", encoding="utf-8") as file:
+        for chunk in chunks:
+            file.write(json.dumps(chunk, ensure_ascii=False) + "\n")
+
+
 def main() -> None:
-    chunks = build_chunks(
-        "/Users/hrugvedambre/Documents/Veloit-Voice-Rag/Visa & Immigration Handbook for Germany - 260807-1.pdf"
+    pdf_path = (
+        "/Users/hrugvedambre/Documents/Veloit-Voice-Rag/"
+        "Visa & Immigration Handbook for Germany - 260807-1.pdf"
     )
 
+    output_path = (
+        "/Users/hrugvedambre/Documents/Veloit-Voice-Rag/"
+        "output/driver_declaration.jsonl"
+    )
+
+    chunks = build_chunks(pdf_path)
+    write_jsonl(chunks, output_path)
+
+    print(f"\nWrote {len(chunks)} chunks to: {output_path}")
+
     for chunk in chunks:
-        print(f"\n--- CHUNK: {chunk.kind} ---\n")
-        print(chunk.text)
+        print(f"\n--- CHUNK: {chunk['chunk_id']} ---\n")
+
+        for key, value in chunk.items():
+            if key == "text":
+                continue
+
+            print(f"{key}: {value}")
+
+        print("\ntext:")
+        print(chunk["text"])
 
 
 if __name__ == "__main__":

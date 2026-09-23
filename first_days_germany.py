@@ -1,11 +1,7 @@
-from dataclasses import dataclass
+import json
+from pathlib import Path
+
 from pypdf import PdfReader
-
-
-@dataclass(frozen=True)
-class Chunk:
-    kind: str
-    text: str
 
 
 def normalize_text(text: str) -> str:
@@ -45,8 +41,11 @@ def normalize_for_match(text: str) -> str:
     return " ".join(text.split()).strip().lower()
 
 
-def find_exact_heading_index(lines: list[str], heading: str, start: int = 0) -> int:
-    """Requires an exact line match, so body text mentioning the heading word is ignored."""
+def find_exact_heading_index(
+    lines: list[str],
+    heading: str,
+    start: int = 0,
+) -> int:
     target = normalize_for_match(heading)
 
     for i in range(start, len(lines)):
@@ -58,7 +57,168 @@ def find_exact_heading_index(lines: list[str], heading: str, start: int = 0) -> 
     raise ValueError(f"Heading not found (exact match required): {heading}")
 
 
-def build_chunks(pdf_path: str) -> list[Chunk]:
+CHUNK_METADATA = {
+    "first_days_intro": {
+        "chunk_id": "first_days_intro",
+        "chunk_kind": "intro",
+        "section_title": "Your First Days in Germany",
+        "subsection_title": "Introduction",
+        "topic_tags": [
+            "arrival",
+            "first_days",
+            "germany",
+            "orientation",
+            "international_drivers",
+        ],
+        "intent_type": "arrival_guidance",
+        "entity_tags": [
+            "Germany",
+            "EuroJobsCenter",
+        ],
+        "base_language": "en",
+    },
+    "your_arrival": {
+        "chunk_id": "first_days_your_arrival",
+        "chunk_kind": "process_step",
+        "section_title": "Your First Days in Germany",
+        "subsection_title": "Your Arrival",
+        "topic_tags": [
+            "arrival",
+            "travel",
+            "first_steps",
+            "germany",
+            "employer_contact",
+        ],
+        "intent_type": "arrival_guidance",
+        "entity_tags": [
+            "Germany",
+        ],
+        "base_language": "en",
+    },
+    "accommodation": {
+        "chunk_id": "first_days_accommodation",
+        "chunk_kind": "explanation",
+        "section_title": "Your First Days in Germany",
+        "subsection_title": "Accommodation",
+        "topic_tags": [
+            "accommodation",
+            "housing",
+            "temporary_housing",
+            "employer_support",
+        ],
+        "intent_type": "arrival_guidance",
+        "entity_tags": [],
+        "base_language": "en",
+    },
+    "registration_administrative": {
+        "chunk_id": "first_days_registration_administrative",
+        "chunk_kind": "process_step",
+        "section_title": "Your First Days in Germany",
+        "subsection_title": "Registration and Administrative Procedures",
+        "topic_tags": [
+            "registration",
+            "administrative_procedures",
+            "documents",
+            "legal_requirements",
+            "germany",
+        ],
+        "intent_type": "process_step",
+        "entity_tags": [
+            "Germany",
+        ],
+        "base_language": "en",
+    },
+    "getting_to_know_employer": {
+        "chunk_id": "first_days_getting_to_know_employer",
+        "chunk_kind": "explanation",
+        "section_title": "Your First Days in Germany",
+        "subsection_title": "Getting to Know Your Employer",
+        "topic_tags": [
+            "employer",
+            "company_orientation",
+            "workplace_introduction",
+            "first_days",
+        ],
+        "intent_type": "arrival_guidance",
+        "entity_tags": [],
+        "base_language": "en",
+    },
+    "practical_driving_assessment": {
+        "chunk_id": "first_days_practical_driving_assessment",
+        "chunk_kind": "process_step",
+        "section_title": "Your First Days in Germany",
+        "subsection_title": "Practical Driving Assessment",
+        "topic_tags": [
+            "driving_assessment",
+            "skills_test",
+            "safety",
+            "employer_evaluation",
+            "truck_drivers",
+        ],
+        "intent_type": "process_step",
+        "entity_tags": [],
+        "base_language": "en",
+    },
+    "communication_important": {
+        "chunk_id": "first_days_communication_important",
+        "chunk_kind": "explanation",
+        "section_title": "Your First Days in Germany",
+        "subsection_title": "Communication Is Important",
+        "topic_tags": [
+            "communication",
+            "questions",
+            "clarification",
+            "professionalism",
+            "first_days",
+        ],
+        "intent_type": "arrival_guidance",
+        "entity_tags": [],
+        "base_language": "en",
+    },
+    "first_impression_matters": {
+        "chunk_id": "first_days_first_impression_matters",
+        "chunk_kind": "career_guidance",
+        "section_title": "Your First Days in Germany",
+        "subsection_title": "Your First Impression Matters",
+        "topic_tags": [
+            "first_impression",
+            "professionalism",
+            "reliability",
+            "respect",
+            "career_start",
+        ],
+        "intent_type": "career_guidance",
+        "entity_tags": [],
+        "base_language": "en",
+    },
+    "remember_summary": {
+        "chunk_id": "first_days_remember_summary",
+        "chunk_kind": "summary",
+        "section_title": "Your First Days in Germany",
+        "subsection_title": "Remember",
+        "topic_tags": [
+            "summary",
+            "first_days",
+            "arrival",
+            "professionalism",
+            "germany",
+        ],
+        "intent_type": "explanation",
+        "entity_tags": [
+            "Germany",
+        ],
+        "base_language": "en",
+    },
+}
+
+
+def make_chunk(kind: str, text: str) -> dict:
+    metadata = CHUNK_METADATA[kind].copy()
+    metadata["text"] = text
+    return metadata
+
+
+def build_chunks(pdf_path: str) -> list[dict]:
     reader = PdfReader(pdf_path)
 
     raw_text = ""
@@ -99,20 +259,48 @@ def build_chunks(pdf_path: str) -> list[Chunk]:
         else:
             end_idx = len(lines)
 
-        chunk_lines = lines[start_idx:end_idx]
-        chunks.append(Chunk(kind=kind, text="\n".join(chunk_lines)))
+        chunk_text = "\n".join(lines[start_idx:end_idx])
+        chunks.append(make_chunk(kind, chunk_text))
 
     return chunks
 
 
+def write_jsonl(chunks: list[dict], output_path: str) -> None:
+    output_file = Path(output_path)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with output_file.open("w", encoding="utf-8") as file:
+        for chunk in chunks:
+            file.write(json.dumps(chunk, ensure_ascii=False) + "\n")
+
+
 def main() -> None:
-    chunks = build_chunks(
-        "/Users/hrugvedambre/Documents/Veloit-Voice-Rag/Visa & Immigration Handbook for Germany - 260807-1.pdf"
+    pdf_path = (
+        "/Users/hrugvedambre/Documents/Veloit-Voice-Rag/"
+        "Visa & Immigration Handbook for Germany - 260807-1.pdf"
     )
 
+    output_path = (
+        "/Users/hrugvedambre/Documents/Veloit-Voice-Rag/"
+        "output/first_days_germany.jsonl"
+    )
+
+    chunks = build_chunks(pdf_path)
+    write_jsonl(chunks, output_path)
+
+    print(f"\nWrote {len(chunks)} chunks to: {output_path}")
+
     for chunk in chunks:
-        print(f"\n--- CHUNK: {chunk.kind} ---\n")
-        print(chunk.text)
+        print(f"\n--- CHUNK: {chunk['chunk_id']} ---\n")
+
+        for key, value in chunk.items():
+            if key == "text":
+                continue
+
+            print(f"{key}: {value}")
+
+        print("\ntext:")
+        print(chunk["text"])
 
 
 if __name__ == "__main__":

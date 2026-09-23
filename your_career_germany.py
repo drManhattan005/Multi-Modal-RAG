@@ -1,11 +1,7 @@
-from dataclasses import dataclass
+import json
+from pathlib import Path
+
 from pypdf import PdfReader
-
-
-@dataclass(frozen=True)
-class Chunk:
-    kind: str
-    text: str
 
 
 def normalize_text(text: str) -> str:
@@ -45,7 +41,11 @@ def normalize_for_match(text: str) -> str:
     return " ".join(text.split()).strip().lower()
 
 
-def find_heading_index(lines: list[str], heading: str, start: int = 0) -> int | None:
+def find_heading_index(
+    lines: list[str],
+    heading: str,
+    start: int = 0,
+) -> int | None:
     target = normalize_for_match(heading)
 
     for i in range(start, len(lines)):
@@ -66,7 +66,218 @@ def find_heading_index(lines: list[str], heading: str, start: int = 0) -> int | 
     return None
 
 
-def build_chunks(pdf_path: str) -> list[Chunk]:
+CHUNK_METADATA = {
+    "career_intro": {
+        "chunk_id": "career_intro",
+        "chunk_kind": "intro",
+        "section_title": "Your Career in Germany",
+        "subsection_title": "Introduction",
+        "topic_tags": [
+            "career",
+            "germany",
+            "truck_drivers",
+            "professional_future",
+            "employment",
+        ],
+        "intent_type": "career_guidance",
+        "entity_tags": [
+            "Germany",
+            "EuroJobsCenter",
+        ],
+        "base_language": "en",
+    },
+    "professionalism_creates_opportunities": {
+        "chunk_id": "career_professionalism_creates_opportunities",
+        "chunk_kind": "career_guidance",
+        "section_title": "Your Career in Germany",
+        "subsection_title": "Professionalism Creates Opportunities",
+        "topic_tags": [
+            "professionalism",
+            "career_growth",
+            "opportunities",
+            "employability",
+        ],
+        "intent_type": "career_guidance",
+        "entity_tags": [],
+        "base_language": "en",
+    },
+    "your_salary": {
+        "chunk_id": "career_your_salary",
+        "chunk_kind": "explanation",
+        "section_title": "Your Career in Germany",
+        "subsection_title": "Your Salary",
+        "topic_tags": [
+            "salary",
+            "employment_contract",
+            "qualifications",
+            "responsibilities",
+            "earnings",
+        ],
+        "intent_type": "explanation",
+        "entity_tags": [],
+        "base_language": "en",
+    },
+    "bonuses_and_benefits": {
+        "chunk_id": "career_bonuses_and_benefits",
+        "chunk_kind": "explanation",
+        "section_title": "Your Career in Germany",
+        "subsection_title": "Bonuses and Additional Benefits",
+        "topic_tags": [
+            "bonuses",
+            "benefits",
+            "safe_driving",
+            "attendance",
+            "performance",
+        ],
+        "intent_type": "explanation",
+        "entity_tags": [],
+        "base_language": "en",
+    },
+    "paid_vacation": {
+        "chunk_id": "career_paid_vacation",
+        "chunk_kind": "legal_information",
+        "section_title": "Your Career in Germany",
+        "subsection_title": "Paid Vacation",
+        "topic_tags": [
+            "paid_vacation",
+            "leave",
+            "employment_rights",
+            "germany",
+        ],
+        "intent_type": "legal_information",
+        "entity_tags": [
+            "Germany",
+        ],
+        "base_language": "en",
+    },
+    "health_insurance": {
+        "chunk_id": "career_health_insurance",
+        "chunk_kind": "legal_information",
+        "section_title": "Your Career in Germany",
+        "subsection_title": "Health Insurance",
+        "topic_tags": [
+            "health_insurance",
+            "medical_coverage",
+            "legal_employment",
+            "germany",
+        ],
+        "intent_type": "legal_information",
+        "entity_tags": [
+            "Germany",
+            "German health insurance system",
+        ],
+        "base_language": "en",
+    },
+    "social_security_pension": {
+        "chunk_id": "career_social_security_pension",
+        "chunk_kind": "legal_information",
+        "section_title": "Your Career in Germany",
+        "subsection_title": "Social Security and Pension",
+        "topic_tags": [
+            "social_security",
+            "pension",
+            "contributions",
+            "employment_rights",
+            "germany",
+        ],
+        "intent_type": "legal_information",
+        "entity_tags": [
+            "Germany",
+        ],
+        "base_language": "en",
+    },
+    "continuous_learning": {
+        "chunk_id": "career_continuous_learning",
+        "chunk_kind": "career_guidance",
+        "section_title": "Your Career in Germany",
+        "subsection_title": "Continuous Learning",
+        "topic_tags": [
+            "continuous_learning",
+            "qualifications",
+            "career_growth",
+            "skills_development",
+        ],
+        "intent_type": "career_guidance",
+        "entity_tags": [
+            "Code 95",
+            "Driver Card",
+        ],
+        "base_language": "en",
+    },
+    "respect_is_important": {
+        "chunk_id": "career_respect_is_important",
+        "chunk_kind": "career_guidance",
+        "section_title": "Your Career in Germany",
+        "subsection_title": "Respect Is Important",
+        "topic_tags": [
+            "respect",
+            "professional_conduct",
+            "workplace_behavior",
+            "professionalism",
+        ],
+        "intent_type": "career_guidance",
+        "entity_tags": [],
+        "base_language": "en",
+    },
+    "your_reputation_matters": {
+        "chunk_id": "career_your_reputation_matters",
+        "chunk_kind": "career_guidance",
+        "section_title": "Your Career in Germany",
+        "subsection_title": "Your Reputation Matters",
+        "topic_tags": [
+            "reputation",
+            "future_employers",
+            "professionalism",
+            "career_growth",
+        ],
+        "intent_type": "career_guidance",
+        "entity_tags": [],
+        "base_language": "en",
+    },
+    "long_term_journey": {
+        "chunk_id": "career_long_term_journey",
+        "chunk_kind": "summary",
+        "section_title": "Your Career in Germany",
+        "subsection_title": "Success Is a Long-Term Journey",
+        "topic_tags": [
+            "long_term_career",
+            "success",
+            "professional_growth",
+            "career_development",
+        ],
+        "intent_type": "career_guidance",
+        "entity_tags": [],
+        "base_language": "en",
+    },
+    "our_message_to_you": {
+        "chunk_id": "career_our_message_to_you",
+        "chunk_kind": "message",
+        "section_title": "Your Career in Germany",
+        "subsection_title": "Our Message to You",
+        "topic_tags": [
+            "final_message",
+            "career_guidance",
+            "professionalism",
+            "confidence",
+            "germany",
+        ],
+        "intent_type": "career_guidance",
+        "entity_tags": [
+            "Germany",
+            "EuroJobsCenter",
+        ],
+        "base_language": "en",
+    },
+}
+
+
+def make_chunk(kind: str, text: str) -> dict:
+    metadata = CHUNK_METADATA[kind].copy()
+    metadata["text"] = text
+    return metadata
+
+
+def build_chunks(pdf_path: str) -> list[dict]:
     reader = PdfReader(pdf_path)
 
     raw_text = ""
@@ -97,6 +308,7 @@ def build_chunks(pdf_path: str) -> list[Chunk]:
 
     for kind, heading in markers:
         idx = find_heading_index(lines, heading, start=search_start)
+
         if idx is not None:
             found.append((kind, idx, heading))
             search_start = idx + 1
@@ -114,20 +326,48 @@ def build_chunks(pdf_path: str) -> list[Chunk]:
         else:
             end_idx = len(lines)
 
-        chunk_lines = lines[start_idx:end_idx]
-        chunks.append(Chunk(kind=kind, text="\n".join(chunk_lines)))
+        chunk_text = "\n".join(lines[start_idx:end_idx])
+        chunks.append(make_chunk(kind, chunk_text))
 
     return chunks
 
 
+def write_jsonl(chunks: list[dict], output_path: str) -> None:
+    output_file = Path(output_path)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with output_file.open("w", encoding="utf-8") as file:
+        for chunk in chunks:
+            file.write(json.dumps(chunk, ensure_ascii=False) + "\n")
+
+
 def main() -> None:
-    chunks = build_chunks(
-        "/Users/hrugvedambre/Documents/Veloit-Voice-Rag/Visa & Immigration Handbook for Germany - 260807-1.pdf"
+    pdf_path = (
+        "/Users/hrugvedambre/Documents/Veloit-Voice-Rag/"
+        "Visa & Immigration Handbook for Germany - 260807-1.pdf"
     )
 
+    output_path = (
+        "/Users/hrugvedambre/Documents/Veloit-Voice-Rag/"
+        "output/your_career_germany.jsonl"
+    )
+
+    chunks = build_chunks(pdf_path)
+    write_jsonl(chunks, output_path)
+
+    print(f"\nWrote {len(chunks)} chunks to: {output_path}")
+
     for chunk in chunks:
-        print(f"\n--- CHUNK: {chunk.kind} ---\n")
-        print(chunk.text)
+        print(f"\n--- CHUNK: {chunk['chunk_id']} ---\n")
+
+        for key, value in chunk.items():
+            if key == "text":
+                continue
+
+            print(f"{key}: {value}")
+
+        print("\ntext:")
+        print(chunk["text"])
 
 
 if __name__ == "__main__":

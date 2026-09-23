@@ -1,11 +1,7 @@
-from dataclasses import dataclass
+import json
+from pathlib import Path
+
 from pypdf import PdfReader
-
-
-@dataclass(frozen=True)
-class Chunk:
-    kind: str
-    text: str
 
 
 def normalize_text(text: str) -> str:
@@ -52,36 +48,233 @@ def find_heading_index(
 ) -> int | None:
     target = normalize_for_match(heading)
 
-    # Exact normalized line match.
     for i in range(start, len(lines)):
         candidate = normalize_for_match(lines[i])
-
         if candidate == target:
             return i
 
-    # Heading may be merged with nearby extracted text.
     for i in range(start, len(lines)):
         candidate = normalize_for_match(lines[i])
-
         if target in candidate:
             return i
 
-    # Heading may be split across two extracted lines.
     for i in range(start, len(lines) - 1):
         combined = normalize_for_match(lines[i] + " " + lines[i + 1])
-
         if combined == target or target in combined:
             return i
 
     return None
 
 
-def build_chunks(pdf_path: str) -> list[Chunk]:
+CHUNK_METADATA = {
+    "changing_employers_intro": {
+        "chunk_id": "changing_employers_intro",
+        "chunk_kind": "intro",
+        "section_title": "Changing Employers in Germany",
+        "subsection_title": "Introduction",
+        "topic_tags": [
+            "changing_employers",
+            "career_mobility",
+            "employment_change",
+            "germany",
+        ],
+        "intent_type": "explanation",
+        "entity_tags": [
+            "Germany",
+            "EuroJobsCenter",
+        ],
+        "base_language": "en",
+    },
+    "germany_needs_drivers": {
+        "chunk_id": "changing_employers_germany_needs_drivers",
+        "chunk_kind": "policy",
+        "section_title": "Changing Employers in Germany",
+        "subsection_title": "Germany Needs Professional Truck Drivers",
+        "topic_tags": [
+            "driver_shortage",
+            "employment",
+            "germany",
+            "legal_employment",
+        ],
+        "intent_type": "legal_information",
+        "entity_tags": [
+            "Germany",
+        ],
+        "base_language": "en",
+    },
+    "employment_relationship_different": {
+        "chunk_id": "changing_employers_employment_relationship_different",
+        "chunk_kind": "explanation",
+        "section_title": "Changing Employers in Germany",
+        "subsection_title": "Every Employment Relationship Is Different",
+        "topic_tags": [
+            "employment_relationship",
+            "career_change",
+            "job_fit",
+            "professional_life",
+        ],
+        "intent_type": "explanation",
+        "entity_tags": [
+            "Germany",
+        ],
+        "base_language": "en",
+    },
+    "example_better_offer": {
+        "chunk_id": "changing_employers_example_better_offer",
+        "chunk_kind": "summary",
+        "section_title": "Changing Employers in Germany",
+        "subsection_title": "Example",
+        "topic_tags": [
+            "better_job_offer",
+            "berlin",
+            "stuttgart",
+            "changing_employers",
+        ],
+        "intent_type": "career_guidance",
+        "entity_tags": [
+            "Germany",
+            "Stuttgart",
+            "Berlin",
+        ],
+        "base_language": "en",
+    },
+    "example_employer_loses_work": {
+        "chunk_id": "changing_employers_example_employer_loses_work",
+        "chunk_kind": "summary",
+        "section_title": "Changing Employers in Germany",
+        "subsection_title": "Another Example",
+        "topic_tags": [
+            "employer_loses_work",
+            "job_continuity",
+            "employment_change",
+            "legal_procedures",
+        ],
+        "intent_type": "career_guidance",
+        "entity_tags": [
+            "Germany",
+        ],
+        "base_language": "en",
+    },
+    "follow_legal_process": {
+        "chunk_id": "changing_employers_follow_legal_process",
+        "chunk_kind": "process_step",
+        "section_title": "Changing Employers in Germany",
+        "subsection_title": "Always Follow the Legal Process",
+        "topic_tags": [
+            "legal_process",
+            "immigration_authority",
+            "employment_change",
+            "compliance",
+        ],
+        "intent_type": "process_step",
+        "entity_tags": [
+            "Germany",
+            "EuroJobsCenter",
+            "immigration authority",
+        ],
+        "base_language": "en",
+    },
+    "germany_offers_opportunities": {
+        "chunk_id": "changing_employers_germany_offers_opportunities",
+        "chunk_kind": "explanation",
+        "section_title": "Changing Employers in Germany",
+        "subsection_title": "Germany Offers Many Opportunities",
+        "topic_tags": [
+            "transport_companies",
+            "career_growth",
+            "employment_options",
+            "germany",
+        ],
+        "intent_type": "career_guidance",
+        "entity_tags": [
+            "Germany",
+        ],
+        "base_language": "en",
+    },
+    "professional_reputation": {
+        "chunk_id": "changing_employers_professional_reputation",
+        "chunk_kind": "policy",
+        "section_title": "Changing Employers in Germany",
+        "subsection_title": "Your Reputation Is Your Greatest Asset",
+        "topic_tags": [
+            "reputation",
+            "professionalism",
+            "career_growth",
+            "future_employers",
+        ],
+        "intent_type": "career_guidance",
+        "entity_tags": [
+            "Germany",
+        ],
+        "base_language": "en",
+    },
+    "remember_summary": {
+        "chunk_id": "changing_employers_remember_summary",
+        "chunk_kind": "summary",
+        "section_title": "Changing Employers in Germany",
+        "subsection_title": "Remember",
+        "topic_tags": [
+            "summary",
+            "legal_employment",
+            "professionalism",
+            "career_change",
+        ],
+        "intent_type": "explanation",
+        "entity_tags": [
+            "Germany",
+        ],
+        "base_language": "en",
+    },
+    "our_message": {
+        "chunk_id": "changing_employers_our_message",
+        "chunk_kind": "message",
+        "section_title": "Changing Employers in Germany",
+        "subsection_title": "Our Message",
+        "topic_tags": [
+            "career_guidance",
+            "law",
+            "professional_conduct",
+            "long_term_career",
+        ],
+        "intent_type": "career_guidance",
+        "entity_tags": [
+            "Germany",
+        ],
+        "base_language": "en",
+    },
+    "good_to_know": {
+        "chunk_id": "changing_employers_good_to_know",
+        "chunk_kind": "summary",
+        "section_title": "Changing Employers in Germany",
+        "subsection_title": "Good to Know",
+        "topic_tags": [
+            "example",
+            "changing_employers",
+            "legal_requirements",
+            "qualified_professionals",
+        ],
+        "intent_type": "legal_information",
+        "entity_tags": [
+            "Germany",
+            "Stuttgart",
+            "Berlin",
+        ],
+        "base_language": "en",
+    },
+}
+
+
+def make_chunk(kind: str, text: str) -> dict:
+    metadata = CHUNK_METADATA[kind].copy()
+    metadata["text"] = text
+    return metadata
+
+
+def build_chunks(pdf_path: str) -> list[dict]:
     reader = PdfReader(pdf_path)
 
     raw_text = ""
 
-    # PDF pages 28–31 -> zero-based indices 27–30.
     for page_num in [27, 28, 29, 30]:
         raw_text += (reader.pages[page_num].extract_text() or "") + "\n"
 
@@ -127,19 +320,38 @@ def build_chunks(pdf_path: str) -> list[Chunk]:
             end_index = len(lines)
 
         chunk_text = "\n".join(lines[start_index:end_index])
-        chunks.append(Chunk(kind=kind, text=chunk_text))
+        chunks.append(make_chunk(kind, chunk_text))
 
     return chunks
 
 
+def write_jsonl(chunks: list[dict], output_path: str) -> None:
+    output_file = Path(output_path)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with output_file.open("w", encoding="utf-8") as f:
+        for chunk in chunks:
+            f.write(json.dumps(chunk, ensure_ascii=False) + "\n")
+
+
 def main() -> None:
-    chunks = build_chunks(
-        "/Users/hrugvedambre/Documents/Veloit-Voice-Rag/Visa & Immigration Handbook for Germany - 260807-1.pdf"
-    )
+    pdf_path = "/Users/hrugvedambre/Documents/Veloit-Voice-Rag/Visa & Immigration Handbook for Germany - 260807-1.pdf"
+    output_path = "/Users/hrugvedambre/Documents/Veloit-Voice-Rag/output/changing_employers.jsonl"
+
+    chunks = build_chunks(pdf_path)
+    write_jsonl(chunks, output_path)
+
+    print(f"\nWrote {len(chunks)} chunks to: {output_path}")
 
     for chunk in chunks:
-        print(f"\n--- CHUNK: {chunk.kind} ---\n")
-        print(chunk.text)
+        print(f"\n--- CHUNK: {chunk['chunk_id']} ---\n")
+        for key, value in chunk.items():
+            if key == "text":
+                continue
+            print(f"{key}: {value}")
+
+        print("\ntext:")
+        print(chunk["text"])
 
 
 if __name__ == "__main__":

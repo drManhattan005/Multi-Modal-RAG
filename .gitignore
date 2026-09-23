@@ -35,3 +35,7 @@ chunks/
 *.jsonl
 
 Visa & Immigration Handbook for Germany - 260807-1.pdf
+
+# Local model and vector DB artifacts
+models/
+qdrant_data/

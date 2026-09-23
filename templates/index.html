@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Veloit RAG Chat</title>
+    <link rel="stylesheet" href="/static/style.css" />
+</head>
+
+<body>
+    <div class="app">
+        <header class="topbar">
+            <div>
+                <h1>Veloit RAG</h1>
+                <p>Simple local chat</p>
+            </div>
+
+            <div class="topbar-right">
+                <div class="ring-wrap">
+                    <svg class="ring" width="54" height="54" viewBox="0 0 54 54">
+                        <circle class="ring-bg" cx="27" cy="27" r="22"></circle>
+                        <circle class="ring-progress" id="ring-progress" cx="27" cy="27" r="22"></circle>
+                    </svg>
+                    <div class="ring-label" id="ring-label">0%</div>
+                </div>
+                <div class="status" id="status">Ready</div>
+            </div>
+        </header>
+
+        <main class="layout">
+            <section class="chat-shell">
+                <div id="chat" class="chat"></div>
+
+                <form id="chat-form" class="composer">
+                    <input id="message" type="text" placeholder="Ask something..." autocomplete="off" required />
+                    <button type="submit">Send</button>
+                    <button type="button" id="reset-btn" class="ghost-btn">Reset</button>
+                </form>
+            </section>
+
+            <aside class="debug-panel">
+                <div class="debug-header">
+                    <h2>Debug</h2>
+                    <label class="toggle">
+                        <input type="checkbox" id="debug-toggle" checked />
+                        <span>On</span>
+                    </label>
+                </div>
+
+                <div class="debug-block">
+                    <div class="debug-kv"><span>Status</span><span id="dbg-status">Idle</span></div>
+                    <div class="debug-kv"><span>Top score</span><span id="dbg-score">-</span></div>
+                    <div class="debug-kv"><span>Chunks</span><span id="dbg-chunks">-</span></div>
+                    <div class="debug-kv"><span>History msgs</span><span id="dbg-history">-</span></div>
+                    <div class="debug-kv"><span>Context chars</span><span id="dbg-context">-</span></div>
+                    <div class="debug-kv"><span>Session chars</span><span id="dbg-session">-</span></div>
+                </div>
+
+                <div class="debug-block">
+                    <h3>Retrieved chunks</h3>
+                    <div id="debug-chunks" class="debug-list"></div>
+                </div>
+
+                <div class="debug-block">
+                    <h3>Context preview</h3>
+                    <pre id="debug-context" class="debug-context">No request yet.</pre>
+                </div>
+            </aside>
+        </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+
+</html>

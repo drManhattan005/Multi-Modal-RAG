@@ -1,11 +1,7 @@
-from dataclasses import dataclass
+import json
+from pathlib import Path
+
 from pypdf import PdfReader
-
-
-@dataclass(frozen=True)
-class Chunk:
-    kind: str
-    text: str
 
 
 def normalize_text(text: str) -> str:
@@ -34,6 +30,7 @@ def remove_footer(lines: list[str]) -> list[str]:
 
     return result
 
+
 def find_heading_index(lines: list[str], heading: str) -> int:
     target = " ".join(heading.split()).strip().lower()
 
@@ -50,8 +47,76 @@ def find_heading_index(lines: list[str], heading: str) -> int:
     raise ValueError(f"Heading not found: {heading}")
 
 
+CHUNK_METADATA = {
+    "title_intro": {
+        "chunk_id": "before_you_begin_title_intro",
+        "chunk_kind": "intro",
+        "section_title": "Before You Begin",
+        "subsection_title": "Title and Introduction",
+        "topic_tags": [
+            "introduction",
+            "career_start",
+            "germany",
+            "recruitment",
+            "visa_process",
+        ],
+        "intent_type": "explanation",
+        "entity_tags": [
+            "EuroJobsCenter",
+            "Germany",
+        ],
+        "base_language": "en",
+    },
+    "what_you_will_find": {
+        "chunk_id": "before_you_begin_what_you_will_find",
+        "chunk_kind": "summary",
+        "section_title": "Before You Begin",
+        "subsection_title": "What You Will Find in This Handbook",
+        "topic_tags": [
+            "handbook_overview",
+            "fraud",
+            "recruitment_process",
+            "visa_procedure",
+            "arrival",
+            "career",
+        ],
+        "intent_type": "explanation",
+        "entity_tags": [
+            "EuroJobsCenter",
+            "Germany",
+            "Code 95",
+            "Driver Card",
+        ],
+        "base_language": "en",
+    },
+    "our_promise": {
+        "chunk_id": "before_you_begin_our_promise",
+        "chunk_kind": "message",
+        "section_title": "Before You Begin",
+        "subsection_title": "Our Promise",
+        "topic_tags": [
+            "transparency",
+            "professionalism",
+            "trust",
+            "career_guidance",
+        ],
+        "intent_type": "career_guidance",
+        "entity_tags": [
+            "EuroJobsCenter",
+            "Germany",
+        ],
+        "base_language": "en",
+    },
+}
 
-def build_chunks(pdf_path: str) -> list[Chunk]:
+
+def make_chunk(kind: str, text: str) -> dict:
+    metadata = CHUNK_METADATA[kind].copy()
+    metadata["text"] = text
+    return metadata
+
+
+def build_chunks(pdf_path: str) -> list[dict]:
     reader = PdfReader(pdf_path)
 
     raw_text = ""
@@ -70,18 +135,39 @@ def build_chunks(pdf_path: str) -> list[Chunk]:
     promise_lines = lines[promise_idx:]
 
     return [
-        Chunk(kind="title_intro", text="\n".join(intro_lines)),
-        Chunk(kind="what_you_will_find", text="\n".join(handbook_lines)),
-        Chunk(kind="our_promise", text="\n".join(promise_lines)),
+        make_chunk("title_intro", "\n".join(intro_lines)),
+        make_chunk("what_you_will_find", "\n".join(handbook_lines)),
+        make_chunk("our_promise", "\n".join(promise_lines)),
     ]
 
 
+def write_jsonl(chunks: list[dict], output_path: str) -> None:
+    output_file = Path(output_path)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with output_file.open("w", encoding="utf-8") as f:
+        for chunk in chunks:
+            f.write(json.dumps(chunk, ensure_ascii=False) + "\n")
+
+
 def main() -> None:
-    chunks = build_chunks("/Users/hrugvedambre/Documents/Veloit-Voice-Rag/Visa & Immigration Handbook for Germany - 260807-1.pdf")
+    pdf_path = "/Users/hrugvedambre/Documents/Veloit-Voice-Rag/Visa & Immigration Handbook for Germany - 260807-1.pdf"
+    output_path = "/Users/hrugvedambre/Documents/Veloit-Voice-Rag/output/before_you_begin.jsonl"
+
+    chunks = build_chunks(pdf_path)
+    write_jsonl(chunks, output_path)
+
+    print(f"\nWrote {len(chunks)} chunks to: {output_path}")
 
     for chunk in chunks:
-        print(f"\n--- CHUNK: {chunk.kind} ---\n")
-        print(chunk.text)
+        print(f"\n--- CHUNK: {chunk['chunk_id']} ---\n")
+        for key, value in chunk.items():
+            if key == "text":
+                continue
+            print(f"{key}: {value}")
+
+        print("\ntext:")
+        print(chunk["text"])
 
 
 if __name__ == "__main__":
