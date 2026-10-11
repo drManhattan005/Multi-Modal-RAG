@@ -730,3 +730,31 @@ body {
     .composer input { min-width: 0; }
     .ghost-btn { display: none; }
 }
+
+/* ── TTS notice toast ──────────────────────────────────────── */
+.tts-notice {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    z-index: 1000;
+    background: #0f172a;
+    border: 1px solid rgba(239, 68, 68, 0.4);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5), 0 0 12px rgba(239, 68, 68, 0.2);
+    color: #fca5a5;
+    padding: 10px 18px;
+    border-radius: var(--r-md);
+    font-size: 0.85rem;
+    pointer-events: none;
+    transition: opacity var(--t-normal), transform var(--t-normal);
+}
+
+.tts-notice.visible {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.tts-notice.hidden {
+    opacity: 0;
+    transform: translateY(10px);
+    pointer-events: none;
+}

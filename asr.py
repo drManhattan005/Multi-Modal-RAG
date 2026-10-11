@@ -55,14 +55,16 @@ def _detect_audio_suffix(data: bytes) -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
-def transcribe(audio_bytes: bytes, lang_override: str | None = None) -> dict:
+def transcribe(audio_bytes: bytes, language: str = "en", lang_override: str | None = None) -> dict:
     """
-    Returns {"transcript": str, "detected_language": str, "language_confidence": float}
+    Returns {"transcript": str}
 
     Requires ffmpeg on PATH to decode webm/ogg/mp4 audio from the browser.
     """
     if not audio_bytes or len(audio_bytes) < 100:
         raise ValueError("Audio payload is empty or too small.")
+
+    selected_language = (lang_override or language or "en").strip().lower()
 
     suffix = _detect_audio_suffix(audio_bytes)
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
@@ -79,9 +81,9 @@ def transcribe(audio_bytes: bytes, lang_override: str | None = None) -> dict:
             "speech_pad_ms": 400,
         }
 
-        segments, info = _whisper.transcribe(
+        segments, _ = _whisper.transcribe(
             tmp_path,
-            language=lang_override or None,
+            language=selected_language,
             vad_filter=True,
             vad_parameters=vad_parameters,
             beam_size=5,
@@ -97,29 +99,18 @@ def transcribe(audio_bytes: bytes, lang_override: str | None = None) -> dict:
 
         # Fallback: if VAD filtered out soft/conversational speech, retry without VAD
         if not transcript:
-            fallback_segments, fallback_info = _whisper.transcribe(
+            fallback_segments, _ = _whisper.transcribe(
                 tmp_path,
-                language=lang_override or None,
+                language=selected_language,
                 vad_filter=False,
                 beam_size=5,
                 temperature=0.0,
                 condition_on_previous_text=False,
             )
             transcript = " ".join(seg.text for seg in fallback_segments).strip()
-            if transcript:
-                info = fallback_info
-
-        detected = lang_override or (info.language if info else "en") or "en"
-        confidence = (
-            round(float(info.language_probability), 4)
-            if info and info.language_probability is not None
-            else 0.0
-        )
 
         return {
             "transcript": transcript,
-            "detected_language": detected,
-            "language_confidence": confidence,
         }
     finally:
         try:
@@ -132,6 +123,6 @@ def retranscribe(audio_bytes: bytes, forced_language: str) -> dict:
     """
     Re-transcribe the given audio forced to a specific language code.
     """
-    return transcribe(audio_bytes, lang_override=forced_language)
+    return transcribe(audio_bytes, language=forced_language)
 
 
