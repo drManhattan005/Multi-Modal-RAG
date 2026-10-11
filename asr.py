@@ -127,3 +127,11 @@ def transcribe(audio_bytes: bytes, lang_override: str | None = None) -> dict:
         except OSError:
             pass
 
+
+def retranscribe(audio_bytes: bytes, forced_language: str) -> dict:
+    """
+    Re-transcribe the given audio forced to a specific language code.
+    """
+    return transcribe(audio_bytes, lang_override=forced_language)
+
+

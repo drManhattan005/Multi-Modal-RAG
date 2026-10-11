@@ -371,7 +371,6 @@ body {
 
 .msg-lang-badge {
     display: inline-block;
-    margin-top: 6px;
     padding: 2px 8px;
     background: rgba(99,102,241,0.15);
     border: 1px solid rgba(99,102,241,0.3);
@@ -380,6 +379,65 @@ body {
     font-size: 0.72rem;
     font-weight: 600;
     letter-spacing: 0.03em;
+}
+
+.voice-resolution-badge {
+    margin-top: 6px;
+    font-size: 0.72rem;
+    color: rgba(255, 255, 255, 0.8);
+    background: rgba(0, 0, 0, 0.22);
+    border-radius: var(--r-full);
+    padding: 2px 9px;
+    display: inline-block;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.msg-actions-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    flex-wrap: wrap;
+}
+
+.tts-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 0.76rem;
+    font-weight: 500;
+    font-family: inherit;
+    padding: 3px 10px;
+    border-radius: var(--r-full);
+    cursor: pointer;
+    transition: all var(--t-fast);
+    outline: none;
+}
+
+.tts-btn:hover {
+    background: rgba(59, 130, 246, 0.12);
+    border-color: var(--accent);
+    color: var(--text);
+}
+
+.tts-btn:focus-visible {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+.tts-btn.speaking {
+    background: rgba(239, 68, 68, 0.15);
+    border-color: var(--red);
+    color: #fca5a5;
+    animation: ttsPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes ttsPulse {
+    0%, 100% { box-shadow: 0 0 6px rgba(239, 68, 68, 0.2); }
+    50%      { box-shadow: 0 0 14px rgba(239, 68, 68, 0.4); }
 }
 
 .sources {

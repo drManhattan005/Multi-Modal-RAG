@@ -27,9 +27,9 @@
             <div class="topbar-right">
                 <!-- Language selector -->
                 <div class="lang-selector-wrap">
-                    <label for="lang-override" class="sr-only">Language override</label>
-                    <select id="lang-override" title="Answer language override (auto = detected)">
-                        <option value="">Auto-detect</option>
+                    <label for="lang-override" class="sr-only">Language preset</label>
+                    <select id="lang-override" title="Used when speech language is uncertain (confidence below 60%)." aria-label="Language preset">
+                        <option value="none" selected>None (auto)</option>
                         <option value="en">English</option>
                         <option value="de">Deutsch</option>
                         <option value="fr">Français</option>
@@ -41,8 +41,15 @@
                         <option value="sv">Svenska</option>
                         <option value="da">Dansk</option>
                         <option value="fi">Suomi</option>
+                        <option value="nb">Norsk</option>
                         <option value="cs">Čeština</option>
+                        <option value="sk">Slovenčina</option>
+                        <option value="hu">Magyar</option>
                         <option value="ro">Română</option>
+                        <option value="bg">Български</option>
+                        <option value="hr">Hrvatski</option>
+                        <option value="el">Ελληνικά</option>
+                        <option value="tr">Türkçe</option>
                     </select>
                 </div>
 

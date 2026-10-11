@@ -262,6 +262,54 @@ _LANG_NAMES: dict[str, str] = {
     "tr": "Turkish",
 }
 
+DEFAULT_LANG = "en"
+LANG_CONFIDENCE_THRESHOLD = 0.6
+
+
+def resolve_language(
+    detected: str | None,
+    confidence: float | None,
+    preset: str | None,
+    input_mode: str = "text",
+) -> tuple[str, str]:
+    """
+    Resolve target language and source.
+    Returns (language_code, source) where source is 'detected', 'preset', or 'default'.
+    """
+    norm_preset: str | None = None
+    if preset:
+        p = preset.strip().lower()
+        if p not in ("", "none", "auto", "null"):
+            if "-" in p:
+                p = p.split("-")[0]
+            elif "_" in p:
+                p = p.split("_")[0]
+            if p in _LANG_NAMES:
+                norm_preset = p
+
+    if input_mode == "voice":
+        det = detected.strip().lower() if detected else None
+        if det and "-" in det:
+            det = det.split("-")[0]
+        if det and "_" in det:
+            det = det.split("_")[0]
+
+        if (
+            det in _LANG_NAMES
+            and confidence is not None
+            and confidence >= LANG_CONFIDENCE_THRESHOLD
+        ):
+            return (det, "detected")
+        elif norm_preset is not None:
+            return (norm_preset, "preset")
+        else:
+            return (DEFAULT_LANG, "default")
+
+    if norm_preset is not None:
+        return (norm_preset, "preset")
+    return (DEFAULT_LANG, "default")
+
+
 SYSTEM_PROMPT = (
     "You are a concise and factual handbook assistant. "
     "Answer only from the supplied context. "
@@ -342,7 +390,9 @@ class AskRequest(BaseModel):
     question: str
     session_id: str = "default"
     debug: bool = False
-    target_language: str | None = None       # override detected lang
+    preset_language: str | None = None
+    input_mode: str = "text"                 # "voice" | "text", default "text"
+    target_language: str | None = None       # explicit override wins
     normalized_query_en: str | None = None   # pre-normalized query (from /transcribe)
     transcript: str | None = None
     detected_language: str | None = None
@@ -381,12 +431,14 @@ async def reset(body: ResetRequest):
 @app.post("/transcribe")
 async def transcribe_audio(
     audio: UploadFile = File(...),
+    preset_language: str | None = Form(default=None),
     lang_override: str | None = Form(default=None),
 ):
     """
     Accept a browser audio blob (webm/ogg/mp4) and return:
-      transcript, detected_language, language_confidence
+      transcript, detected_language, language_confidence, language, language_source, input_mode, speak
     """
+    effective_preset = preset_language if preset_language is not None else lang_override
     audio_bytes = await audio.read()
     filename = audio.filename or "recording"
     content_type = audio.content_type or "unknown"
@@ -408,7 +460,7 @@ async def transcribe_audio(
     try:
         result = _asr_transcribe(
             audio_bytes,
-            lang_override=lang_override if lang_override else None,
+            lang_override=None,
         )
     except (av.error.InvalidDataError, av.error.FFmpegError, av.AVError, ValueError) as exc:
         print(f"[transcribe] Audio decode error for '{filename}': {exc}")
@@ -423,15 +475,44 @@ async def transcribe_audio(
             detail="Speech recognition failed. Please try again.",
         )
 
-    if not result.get("transcript"):
+    transcript = result.get("transcript", "").strip()
+    detected_language = result.get("detected_language", "en")
+    language_confidence = result.get("language_confidence", 0.0)
+
+    final_lang, source = resolve_language(
+        detected=detected_language,
+        confidence=language_confidence,
+        preset=effective_preset,
+        input_mode="voice",
+    )
+    print(f"[lang] detected={detected_language} conf={language_confidence:.2f} preset={effective_preset} -> final={final_lang} ({source})")
+
+    if final_lang != detected_language:
+        try:
+            re_res = _asr_transcribe(audio_bytes, lang_override=final_lang)
+            if re_res.get("transcript"):
+                transcript = re_res["transcript"].strip()
+                result["transcript"] = transcript
+        except Exception as exc:
+            print(f"[transcribe] Re-transcribe error for forced lang '{final_lang}': {exc}")
+
+    if not transcript:
         print(f"[transcribe] Empty transcript returned for '{filename}'")
         raise HTTPException(
             status_code=422,
             detail="Could not transcribe audio. Please speak clearly and try again.",
         )
 
-    print(f"[transcribe] Success: [{result.get('detected_language')}] '{result.get('transcript')}' (confidence: {result.get('language_confidence')})")
-    return result
+    print(f"[transcribe] Success: [{detected_language}] '{transcript}' (confidence: {language_confidence}) -> final={final_lang} ({source})")
+    return {
+        "transcript": transcript,
+        "detected_language": detected_language,
+        "language_confidence": language_confidence,
+        "language": final_lang,
+        "language_source": source,
+        "input_mode": "voice",
+        "speak": True,
+    }
 
 
 @app.post("/ask")
@@ -451,6 +532,22 @@ async def ask(body: AskRequest):
     history = chat_memory[session_id]
     prune_session_history(history)
 
+    # --- Determine input mode & language resolution ------------------------
+    input_mode = body.input_mode or "text"
+    if body.target_language:
+        target_language = body.target_language
+        source = "preset" if body.preset_language else ("detected" if body.detected_language else "default")
+    else:
+        target_language, source = resolve_language(
+            detected=body.detected_language,
+            confidence=body.language_confidence,
+            preset=body.preset_language,
+            input_mode=input_mode,
+        )
+
+    det_conf = body.language_confidence if body.language_confidence is not None else 0.0
+    print(f"[lang] detected={body.detected_language} conf={det_conf:.2f} preset={body.preset_language} -> final={target_language} ({source})")
+
     # --- Determine retrieval query -----------------------------------------
     # Voice path: normalized_query_en was already produced by /transcribe flow
     # Text path: use question directly (user typed in English)
@@ -460,14 +557,6 @@ async def ask(body: AskRequest):
     points = retrieve_chunks(retrieval_query, limit=RETRIEVAL_TOP_K)
     top_score = max((float(p.score) for p in points if p.score is not None), default=0.0)
     context = build_context(points)
-
-    # --- Target language -----------------------------------------------------
-    # Priority: explicit override → detected from ASR → English default
-    target_language = (
-        body.target_language
-        or body.detected_language
-        or "en"
-    )
 
     # --- Generate answer in target language ----------------------------------
     if not points or top_score < MIN_RETRIEVAL_SCORE:
@@ -498,6 +587,10 @@ async def ask(body: AskRequest):
         "transcript": body.transcript or question,
         "detected_language": body.detected_language or "en",
         "language_confidence": body.language_confidence,
+        "language": target_language,
+        "language_source": source,
+        "input_mode": input_mode,
+        "speak": (input_mode == "voice"),
         "normalized_query_en": retrieval_query,
         "answer": answer,
         "sources": sources,
@@ -526,6 +619,7 @@ async def ask(body: AskRequest):
 async def voice_ask(
     audio: UploadFile = File(...),
     session_id: str = Form(default="default"),
+    preset_language: str | None = Form(default=None),
     lang_override: str | None = Form(default=None),
     debug: bool = Form(default=False),
 ):
@@ -533,13 +627,14 @@ async def voice_ask(
     Combined single-call endpoint: audio blob → full answer JSON.
 
     Pipeline:
-      1. ASR (Faster-Whisper + VAD)
-      2. Language detection
-      3. English normalization (EuroLLM, skipped if already English)
-      4. Qdrant retrieval
-      5. Answer generation in target language
+      1. ASR auto-detect (Faster-Whisper + VAD)
+      2. Language resolution (detected vs preset vs default)
+      3. Re-transcribe if fallback used
+      4. English normalization (EuroLLM, skipped if already English)
+      5. Qdrant retrieval
+      6. Answer generation in target language
     """
-    # Step 1+2: Transcribe
+    effective_preset = preset_language if preset_language is not None else lang_override
     audio_bytes = await audio.read()
     filename = audio.filename or "recording"
     content_type = audio.content_type or "unknown"
@@ -556,7 +651,7 @@ async def voice_ask(
         raise HTTPException(status_code=413, detail="Audio file too large.")
 
     try:
-        asr_result = _asr_transcribe(audio_bytes, lang_override=lang_override or None)
+        asr_result = _asr_transcribe(audio_bytes, lang_override=None)
     except (av.error.InvalidDataError, av.error.FFmpegError, av.AVError, ValueError) as exc:
         print(f"[voice-ask] Audio decode error for '{filename}': {exc}")
         raise HTTPException(
@@ -574,6 +669,24 @@ async def voice_ask(
     detected_language = asr_result.get("detected_language", "en")
     language_confidence = asr_result.get("language_confidence", 0.0)
 
+    # Step 2: Language resolution
+    final_lang, source = resolve_language(
+        detected=detected_language,
+        confidence=language_confidence,
+        preset=effective_preset,
+        input_mode="voice",
+    )
+    print(f"[lang] detected={detected_language} conf={language_confidence:.2f} preset={effective_preset} -> final={final_lang} ({source})")
+
+    # Step 3: If fallback used, re-transcribe forced to resolved language
+    if final_lang != detected_language:
+        try:
+            re_res = _asr_transcribe(audio_bytes, lang_override=final_lang)
+            if re_res.get("transcript"):
+                transcript = re_res["transcript"].strip()
+        except Exception as exc:
+            print(f"[voice-ask] Re-transcribe error for forced lang '{final_lang}': {exc}")
+
     if not transcript:
         print(f"[voice-ask] Empty transcript returned for '{filename}'")
         raise HTTPException(
@@ -581,24 +694,29 @@ async def voice_ask(
             detail="Could not transcribe audio. Please speak clearly and try again.",
         )
 
-    print(f"[voice-ask] Transcribed: [{detected_language}] '{transcript}' (confidence: {language_confidence})")
+    print(f"[voice-ask] Transcribed: [{detected_language}] '{transcript}' (confidence: {language_confidence}) -> final={final_lang} ({source})")
 
-    # Step 3: Normalize to English for retrieval
-    normalized_query_en = normalize_to_english(
-        transcript=transcript,
-        detected_language=detected_language,
-        language_confidence=language_confidence,
-        tokenizer=tokenizer,
-        model=llm,
-        device=device,
-    )
+    # Step 4: Normalize to English for retrieval
+    if final_lang == "en":
+        normalized_query_en = transcript
+    else:
+        normalized_query_en = normalize_to_english(
+            transcript=transcript,
+            detected_language=final_lang,
+            language_confidence=language_confidence,
+            tokenizer=tokenizer,
+            model=llm,
+            device=device,
+        )
 
-    # Steps 4+5: Retrieve + Generate via /ask logic
+    # Steps 5+6: Retrieve + Generate via /ask logic
     ask_body = AskRequest(
         question=transcript,
         session_id=session_id,
         debug=debug,
-        target_language=lang_override or detected_language,
+        target_language=final_lang,
+        preset_language=effective_preset,
+        input_mode="voice",
         normalized_query_en=normalized_query_en,
         transcript=transcript,
         detected_language=detected_language,
@@ -607,6 +725,7 @@ async def voice_ask(
 
     # Reuse the /ask handler logic directly
     return await ask(ask_body)
+
 
 
 # ---------------------------------------------------------------------------
