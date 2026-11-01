@@ -158,6 +158,66 @@ body {
 .lang-selector-wrap select:hover { border-color: var(--accent); }
 .lang-selector-wrap select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
 
+/* Speaker toggle button */
+.icon-toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 14px;
+    border-radius: var(--r-full);
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--muted);
+    font-size: 0.82rem;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all var(--t-fast);
+}
+
+.icon-toggle-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--text);
+    background: var(--glass);
+}
+
+.icon-toggle-btn.active {
+    border-color: var(--accent);
+    color: #fff;
+    background: rgba(59, 130, 246, 0.18);
+    box-shadow: 0 0 12px var(--accent-glow);
+}
+
+.icon-toggle-btn .speaker-off-icon { display: block; }
+.icon-toggle-btn .speaker-on-icon { display: none; }
+.icon-toggle-btn.active .speaker-off-icon { display: none; }
+.icon-toggle-btn.active .speaker-on-icon { display: block; }
+
+/* Stop speaking control in topbar */
+.stop-speaking-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 14px;
+    border-radius: var(--r-full);
+    border: 1px solid var(--rec);
+    background: rgba(239, 68, 68, 0.15);
+    color: var(--rec);
+    font-size: 0.82rem;
+    font-weight: 600;
+    cursor: pointer;
+    animation: recGlow 1.5s ease-in-out infinite;
+    transition: all var(--t-fast);
+}
+
+.stop-speaking-btn:hover {
+    background: rgba(239, 68, 68, 0.28);
+    color: #fff;
+}
+
+.stop-speaking-btn.hidden {
+    display: none !important;
+}
+
 /* Status pill */
 .status {
     padding: 8px 14px;
@@ -546,6 +606,15 @@ body {
     background: rgba(239,68,68,0.1);
     box-shadow: 0 0 18px var(--rec-glow);
     animation: recGlow 1.5s ease-in-out infinite;
+}
+
+.mic-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    border-color: var(--border) !important;
+    color: var(--muted-2) !important;
+    background: var(--panel) !important;
+    box-shadow: none !important;
 }
 
 @keyframes recGlow {

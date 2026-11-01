@@ -1,28 +1,30 @@
 /**
  * app.js — Veloit Voice RAG frontend
  *
- * Two input paths:
- *   TEXT:  user types → POST /ask
- *   VOICE: user clicks mic → MediaRecorder → POST /voice-ask → renders result
- *
- * Language is chosen strictly via the response language dropdown (default: "en").
- * Answers are recited only manually via the "Recite" button in the response's language.
+ * Client-side speech integration via useSpeech (Web Speech API):
+ *   - STT (SpeechRecognition): interim transcripts shown live in input box,
+ *     final transcript automatically sent via existing sendMessage().
+ *   - TTS (speechSynthesis): optional auto-speaking of bot answers (speaker toggle,
+ *     persisted in localStorage), stop-speaking control, and individual Recite buttons.
+ *   - SSR-safe, gracefully disables mic/speaker if unsupported in browser.
  */
 
 // ---------------------------------------------------------------------------
 // DOM refs
 // ---------------------------------------------------------------------------
-const form           = document.getElementById("chat-form");
-const input          = document.getElementById("message");
-const chat           = document.getElementById("chat");
-const statusEl       = document.getElementById("status");
-const resetBtn       = document.getElementById("reset-btn");
-const debugToggle    = document.getElementById("debug-toggle");
-const micBtn         = document.getElementById("mic-btn");
-const micPulse       = document.getElementById("mic-pulse");
-const langOverride   = document.getElementById("lang-override");
+const form             = document.getElementById("chat-form");
+const input            = document.getElementById("message");
+const chat             = document.getElementById("chat");
+const statusEl         = document.getElementById("status");
+const resetBtn         = document.getElementById("reset-btn");
+const debugToggle      = document.getElementById("debug-toggle");
+const micBtn           = document.getElementById("mic-btn");
+const micPulse         = document.getElementById("mic-pulse");
+const langOverride     = document.getElementById("lang-override");
+const speakerToggleBtn = document.getElementById("speaker-toggle-btn");
+const stopSpeakingBtn  = document.getElementById("stop-speaking-btn");
 
-// Transcript panel
+// Transcript panel (kept for backward compatibility if present)
 const transcriptPanel   = document.getElementById("transcript-panel");
 const transcriptText    = document.getElementById("transcript-text");
 const transcriptDismiss = document.getElementById("transcript-dismiss");
@@ -30,33 +32,35 @@ const queryRow          = document.getElementById("query-row");
 const normalizedQuery   = document.getElementById("normalized-query");
 
 // Debug panel
-const dbgStatus   = document.getElementById("dbg-status");
-const dbgLang     = document.getElementById("dbg-lang");
-const dbgQuery    = document.getElementById("dbg-query");
-const dbgScore    = document.getElementById("dbg-score");
-const dbgChunks   = document.getElementById("dbg-chunks");
-const dbgHistory  = document.getElementById("dbg-history");
-const dbgContext  = document.getElementById("dbg-context");
-const dbgSession  = document.getElementById("dbg-session");
-const debugChunksEl  = document.getElementById("debug-chunks");
-const debugContextEl = document.getElementById("debug-context");
+const dbgStatus        = document.getElementById("dbg-status");
+const dbgLang          = document.getElementById("dbg-lang");
+const dbgQuery         = document.getElementById("dbg-query");
+const dbgScore         = document.getElementById("dbg-score");
+const dbgChunks        = document.getElementById("dbg-chunks");
+const dbgHistory       = document.getElementById("dbg-history");
+const dbgContext       = document.getElementById("dbg-context");
+const dbgSession       = document.getElementById("dbg-session");
+const debugChunksEl    = document.getElementById("debug-chunks");
+const debugContextEl   = document.getElementById("debug-context");
 
 // Non-blocking TTS notice toast
-const ttsNoticeEl = document.getElementById("tts-notice");
+const ttsNoticeEl      = document.getElementById("tts-notice");
 
-// Ring
-const ringProgress = document.getElementById("ring-progress");
-const ringLabel    = document.getElementById("ring-label");
+// Session ring
+const ringProgress     = document.getElementById("ring-progress");
+const ringLabel        = document.getElementById("ring-label");
 
 // ---------------------------------------------------------------------------
-// Constants
+// Constants & State
 // ---------------------------------------------------------------------------
-const SESSION_ID   = "default";
-const RADIUS       = 22;
-const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
+const SESSION_ID        = "default";
+const RADIUS            = 22;
+const CIRCUMFERENCE     = 2 * Math.PI * RADIUS;
 
-ringProgress.style.strokeDasharray  = `${CIRCUMFERENCE}`;
-ringProgress.style.strokeDashoffset = `${CIRCUMFERENCE}`;
+if (ringProgress) {
+  ringProgress.style.strokeDasharray  = `${CIRCUMFERENCE}`;
+  ringProgress.style.strokeDashoffset = `${CIRCUMFERENCE}`;
+}
 
 // Language code → display name
 const LANG_NAMES = {
@@ -67,25 +71,32 @@ const LANG_NAMES = {
   bg: "Български", hr: "Hrvatski", el: "Ελληνικά", tr: "Türkçe",
 };
 
-// Language code → BCP-47 locale tag for TTS
+// Language code → BCP-47 locale tag for STT/TTS (defaults to en-IN for English)
 const BCP47_MAP = {
-  en: "en-US", de: "de-DE", fr: "fr-FR", es: "es-ES",
+  en: "en-IN", de: "de-DE", fr: "fr-FR", es: "es-ES",
   it: "it-IT", pt: "pt-PT", nl: "nl-NL", pl: "pl-PL",
   sv: "sv-SE", da: "da-DK", fi: "fi-FI", nb: "nb-NO",
   cs: "cs-CZ", sk: "sk-SK", hu: "hu-HU", ro: "ro-RO",
   bg: "bg-BG", hr: "hr-HR", el: "el-GR", tr: "tr-TR",
 };
 
-// ---------------------------------------------------------------------------
-// Text-to-Speech (Web Speech API)
-// ---------------------------------------------------------------------------
-let ttsSupported = false;
-let cachedVoices = [];
+let isProcessing        = false;
+let isListening         = false;
+let stopListeningFn     = null;
 let activeSpeakingMsgId = null;
-let currentSpeakId = 0;
-let resumeIntervalId = null;
-let ttsNoticeTimer = null;
+let ttsNoticeTimer      = null;
 
+// Speaker toggle state (default OFF, persisted in localStorage)
+let speakerEnabled = false;
+try {
+  speakerEnabled = localStorage.getItem("speaker_enabled") === "true";
+} catch (_) {
+  speakerEnabled = false;
+}
+
+// ---------------------------------------------------------------------------
+// Toast Notice
+// ---------------------------------------------------------------------------
 function showTTSNotice(msg) {
   if (!ttsNoticeEl) return;
   ttsNoticeEl.textContent = msg;
@@ -98,97 +109,101 @@ function showTTSNotice(msg) {
   }, 4000);
 }
 
-function loadVoices() {
-  if (typeof window !== "undefined" && "speechSynthesis" in window) {
-    cachedVoices = window.speechSynthesis.getVoices() || [];
+// ---------------------------------------------------------------------------
+// Speaker (TTS) Toggle & Controls
+// ---------------------------------------------------------------------------
+function updateSpeakerToggleUI() {
+  if (!speakerToggleBtn) return;
+  if (!window.useSpeech || !window.useSpeech.ttsSupported) {
+    speakerToggleBtn.style.display = "none";
+    return;
   }
-}
-
-function initTTS() {
-  if (typeof window !== "undefined" && "speechSynthesis" in window && "SpeechSynthesisUtterance" in window) {
-    ttsSupported = true;
-    loadVoices();
-    if (window.speechSynthesis.onvoiceschanged !== undefined) {
-      window.speechSynthesis.addEventListener("voiceschanged", loadVoices);
-    }
+  speakerToggleBtn.style.display = "inline-flex";
+  if (speakerEnabled) {
+    speakerToggleBtn.classList.add("active");
+    speakerToggleBtn.setAttribute("aria-pressed", "true");
+    speakerToggleBtn.title = "Auto-speak replies (TTS is ON)";
   } else {
-    ttsSupported = false;
+    speakerToggleBtn.classList.remove("active");
+    speakerToggleBtn.setAttribute("aria-pressed", "false");
+    speakerToggleBtn.title = "Auto-speak replies (TTS is OFF)";
   }
 }
 
-function findVoiceForLanguage(langCode) {
-  if (!ttsSupported) return null;
-  const voices = cachedVoices.length ? cachedVoices : (window.speechSynthesis.getVoices() || []);
-  if (!voices.length) return null;
-
-  const targetBcp = (BCP47_MAP[langCode] || langCode || "en-US").toLowerCase();
-  const targetPrefix = (langCode || "en").toLowerCase();
-
-  // 1. Exact match with localService
-  let match = voices.find(v => v.lang && v.lang.toLowerCase() === targetBcp && v.localService);
-  if (match) return match;
-
-  // 2. Exact match any service
-  match = voices.find(v => v.lang && v.lang.toLowerCase() === targetBcp);
-  if (match) return match;
-
-  // 3. Prefix match with localService
-  match = voices.find(v => v.lang && (v.lang.toLowerCase().startsWith(targetPrefix + "-") || v.lang.toLowerCase() === targetPrefix) && v.localService);
-  if (match) return match;
-
-  // 4. Prefix match any service
-  match = voices.find(v => v.lang && (v.lang.toLowerCase().startsWith(targetPrefix + "-") || v.lang.toLowerCase() === targetPrefix));
-  return match || null;
-}
-
-function cleanTextForSpeech(text) {
-  if (!text) return "";
-  let clean = text;
-  // Remove "Sources" lines and everything after them
-  clean = clean.replace(/\n*Sources:[\s\S]*$/i, "");
-  clean = clean.replace(/\bSources:.*$/im, "");
-  // Remove markdown links [text](url) -> text
-  clean = clean.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
-  // Remove citation brackets like [1], [2], [1, 2]
-  clean = clean.replace(/\[(?:\d+(?:,\s*\d+)*|[A-Za-z0-9\s._-]+)\]/g, "");
-  // Remove URLs
-  clean = clean.replace(/https?:\/\/\S+/gi, "");
-  // Remove markdown symbols
-  clean = clean.replace(/[*_~`#>-]/g, " ");
-  // Remove emojis and symbols
-  clean = clean.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F700}-\u{1F77F}\u{1F780}-\u{1F7FF}\u{1F800}-\u{1F8FF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, "");
-  // Normalize whitespace
-  clean = clean.replace(/\s+/g, " ").trim();
-  return clean;
-}
-
-function splitIntoSentences(text, maxLen = 200) {
-  if (!text) return [];
-  const matches = text.match(/[^.!?\n]+[.!?\n]*/g) || [text];
-  const result = [];
-  for (let seg of matches) {
-    seg = seg.trim();
-    if (!seg) continue;
-    if (seg.length <= maxLen) {
-      result.push(seg);
-    } else {
-      const words = seg.split(" ");
-      let cur = "";
-      for (let w of words) {
-        if ((cur + " " + w).trim().length <= maxLen) {
-          cur = (cur + " " + w).trim();
-        } else {
-          if (cur) result.push(cur);
-          cur = w;
-        }
-      }
-      if (cur) result.push(cur);
+if (speakerToggleBtn) {
+  speakerToggleBtn.addEventListener("click", () => {
+    speakerEnabled = !speakerEnabled;
+    try {
+      localStorage.setItem("speaker_enabled", speakerEnabled ? "true" : "false");
+    } catch (_) {}
+    updateSpeakerToggleUI();
+    if (!speakerEnabled && window.useSpeech) {
+      window.useSpeech.stopSpeaking();
     }
-  }
-  return result;
+  });
 }
 
-function updateTTSButtons() {
+if (stopSpeakingBtn) {
+  stopSpeakingBtn.addEventListener("click", () => {
+    if (window.useSpeech) {
+      window.useSpeech.stopSpeaking();
+    }
+  });
+}
+
+// Sync global speaking state to UI
+if (window.useSpeech && typeof window.useSpeech.onSpeakingChange === "function") {
+  window.useSpeech.onSpeakingChange((isSpeaking) => {
+    if (stopSpeakingBtn) {
+      if (isSpeaking) {
+        stopSpeakingBtn.classList.remove("hidden");
+      } else {
+        stopSpeakingBtn.classList.add("hidden");
+      }
+    }
+    if (!isSpeaking) {
+      activeSpeakingMsgId = null;
+      updateReciteButtons();
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// UI Utilities
+// ---------------------------------------------------------------------------
+function escapeHtml(text) {
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function setStatus(msg) {
+  if (statusEl) statusEl.textContent = msg;
+}
+
+function setInputsDisabled(disabled) {
+  if (input) input.disabled = disabled;
+  if (micBtn && window.useSpeech && window.useSpeech.sttSupported) {
+    micBtn.disabled = disabled;
+  }
+  const submitBtn = form ? form.querySelector("[type='submit']") : null;
+  if (submitBtn) submitBtn.disabled = disabled;
+}
+
+function setRing(fillRatio) {
+  if (!ringProgress || !ringLabel) return;
+  const ratio  = Math.max(0, Math.min(fillRatio || 0, 1));
+  const offset = CIRCUMFERENCE * (1 - ratio);
+  ringProgress.style.strokeDashoffset = `${offset}`;
+  ringLabel.textContent = `${Math.round(ratio * 100)}%`;
+  ringProgress.style.stroke =
+    ratio < 0.5 ? "#22c55e" : ratio < 0.8 ? "#eab308" : "#ef4444";
+}
+
+// ---------------------------------------------------------------------------
+// Chat messages & Recite buttons
+// ---------------------------------------------------------------------------
+function updateReciteButtons() {
   const buttons = document.querySelectorAll(".recite-btn");
   buttons.forEach((btn) => {
     const id = btn.getAttribute("data-msg-id");
@@ -205,158 +220,6 @@ function updateTTSButtons() {
   });
 }
 
-function startResumeHeartbeat() {
-  stopResumeHeartbeat();
-  resumeIntervalId = setInterval(() => {
-    if (typeof window !== "undefined" && window.speechSynthesis && window.speechSynthesis.speaking) {
-      window.speechSynthesis.resume();
-    }
-  }, 10000);
-}
-
-function stopResumeHeartbeat() {
-  if (resumeIntervalId) {
-    clearInterval(resumeIntervalId);
-    resumeIntervalId = null;
-  }
-}
-
-function stopSpeaking() {
-  currentSpeakId++;
-  stopResumeHeartbeat();
-  if (ttsSupported && window.speechSynthesis) {
-    window.speechSynthesis.cancel();
-  }
-  if (activeSpeakingMsgId !== null) {
-    activeSpeakingMsgId = null;
-    updateTTSButtons();
-  }
-}
-
-function speak(text, langCode = "en", msgId = null, isRetry = false) {
-  if (!ttsSupported || !window.speechSynthesis) return;
-
-  // Ensure voices are loaded
-  loadVoices();
-  if (cachedVoices.length === 0 && !isRetry) {
-    // Retry once after 250 ms if cached list is empty
-    setTimeout(() => {
-      loadVoices();
-      speak(text, langCode, msgId, true);
-    }, 250);
-    return;
-  }
-
-  // Cancel any ongoing speech
-  stopSpeaking();
-
-  const cleaned = cleanTextForSpeech(text);
-  if (!cleaned) return;
-
-  const chunks = splitIntoSentences(cleaned, 200);
-  if (!chunks.length) return;
-
-  activeSpeakingMsgId = msgId;
-  updateTTSButtons();
-
-  const speakId = ++currentSpeakId;
-  const bcpTag = BCP47_MAP[langCode] || langCode || "en-US";
-  const voice = findVoiceForLanguage(langCode);
-
-  if (!voice) {
-    console.warn(`[TTS] No matching voice found for language '${langCode}' (${bcpTag}). Letting browser pick voice.`);
-    if (cachedVoices.length === 0) {
-      const langName = LANG_NAMES[langCode] || langCode.toUpperCase();
-      showTTSNotice(`No ${langName} voice installed on this device.`);
-      activeSpeakingMsgId = null;
-      updateTTSButtons();
-      return;
-    }
-  }
-
-  // Chrome can drop utterances queued in same tick as cancel(); wait 80ms
-  setTimeout(() => {
-    if (speakId !== currentSpeakId) return;
-
-    startResumeHeartbeat();
-
-    chunks.forEach((chunk, idx) => {
-      const utter = new SpeechSynthesisUtterance(chunk);
-      if (voice) {
-        utter.voice = voice;
-        utter.lang = voice.lang || bcpTag;
-      } else {
-        utter.lang = bcpTag;
-      }
-      utter.rate = 1.0;
-      utter.pitch = 1.0;
-
-      if (idx === chunks.length - 1) {
-        utter.onend = () => {
-          if (speakId === currentSpeakId) {
-            stopResumeHeartbeat();
-            activeSpeakingMsgId = null;
-            updateTTSButtons();
-          }
-        };
-      }
-
-      utter.onerror = (e) => {
-        if (e.error !== "canceled" && e.error !== "interrupted") {
-          console.warn("[TTS] Utterance error:", e.error, e);
-          const langName = LANG_NAMES[langCode] || langCode.toUpperCase();
-          showTTSNotice(`No ${langName} voice installed on this device.`);
-        }
-        if (speakId === currentSpeakId) {
-          stopResumeHeartbeat();
-          activeSpeakingMsgId = null;
-          updateTTSButtons();
-        }
-      };
-
-      window.speechSynthesis.speak(utter);
-    });
-  }, 80);
-}
-
-window.addEventListener("beforeunload", () => {
-  stopSpeaking();
-});
-
-// ---------------------------------------------------------------------------
-// Utilities
-// ---------------------------------------------------------------------------
-function escapeHtml(text) {
-  const div = document.createElement("div");
-  div.textContent = text;
-  return div.innerHTML;
-}
-
-function setStatus(msg) {
-  statusEl.textContent = msg;
-}
-
-function setInputsDisabled(disabled) {
-  input.disabled  = disabled;
-  micBtn.disabled = disabled;
-  form.querySelector("[type='submit']").disabled = disabled;
-}
-
-// ---------------------------------------------------------------------------
-// Ring indicator
-// ---------------------------------------------------------------------------
-function setRing(fillRatio) {
-  const ratio  = Math.max(0, Math.min(fillRatio || 0, 1));
-  const offset = CIRCUMFERENCE * (1 - ratio);
-  ringProgress.style.strokeDashoffset = `${offset}`;
-  ringLabel.textContent = `${Math.round(ratio * 100)}%`;
-  ringProgress.style.stroke =
-    ratio < 0.5 ? "#22c55e" : ratio < 0.8 ? "#eab308" : "#ef4444";
-}
-
-// ---------------------------------------------------------------------------
-// Chat messages
-// ---------------------------------------------------------------------------
 function addMessage(text, role, sources = [], meta = {}) {
   const msgId = "msg-" + Date.now() + "-" + Math.random().toString(36).slice(2, 7);
   const wrap = document.createElement("div");
@@ -364,17 +227,13 @@ function addMessage(text, role, sources = [], meta = {}) {
   wrap.setAttribute("data-msg-id", msgId);
   wrap.setAttribute("data-lang", meta.language || "en");
 
-  if (role === "voice") {
-    wrap.className = "message user voice-msg";
-  }
-
   const textEl = document.createElement("div");
   textEl.className = "message-text";
   textEl.textContent = text;
   wrap.appendChild(textEl);
 
-  // Recite button for bot messages
-  if ((role === "bot" || role === "voice-bot") && ttsSupported) {
+  // Recite button for bot replies
+  if (role === "bot" && window.useSpeech && window.useSpeech.ttsSupported) {
     const actionsRow = document.createElement("div");
     actionsRow.className = "msg-actions-row";
 
@@ -387,10 +246,24 @@ function addMessage(text, role, sources = [], meta = {}) {
 
     reciteBtn.addEventListener("click", () => {
       if (activeSpeakingMsgId === msgId) {
-        stopSpeaking();
+        window.useSpeech.stopSpeaking();
+        activeSpeakingMsgId = null;
+        updateReciteButtons();
       } else {
-        const msgLang = wrap.getAttribute("data-lang") || "en";
-        speak(text, msgLang, msgId);
+        const msgLang = wrap.getAttribute("data-lang") || langOverride.value || "en";
+        const bcpTag = BCP47_MAP[msgLang] || msgLang || "en-IN";
+        activeSpeakingMsgId = msgId;
+        updateReciteButtons();
+        window.useSpeech.speak(text, bcpTag, {
+          onEnd: () => {
+            activeSpeakingMsgId = null;
+            updateReciteButtons();
+          },
+          onError: () => {
+            activeSpeakingMsgId = null;
+            updateReciteButtons();
+          },
+        });
       }
     });
 
@@ -398,7 +271,7 @@ function addMessage(text, role, sources = [], meta = {}) {
     wrap.appendChild(actionsRow);
   }
 
-  if ((role === "bot" || role === "voice-bot") && sources.length) {
+  if (role === "bot" && sources && sources.length) {
     const srcEl = document.createElement("div");
     srcEl.className = "sources";
     srcEl.textContent = "Sources: " + sources
@@ -413,7 +286,6 @@ function addMessage(text, role, sources = [], meta = {}) {
   return wrap;
 }
 
-// Typing indicator
 function addTypingIndicator() {
   const wrap = document.createElement("div");
   wrap.className = "message bot typing-msg";
@@ -433,6 +305,7 @@ function removeTypingIndicator() {
 // Debug panel
 // ---------------------------------------------------------------------------
 function renderDebug(data) {
+  if (!dbgStatus) return;
   const meta  = data.meta  || {};
   const debug = data.debug || {};
 
@@ -451,45 +324,27 @@ function renderDebug(data) {
   setRing(meta.session_fill_ratio || 0);
 
   const chunks = debug.retrieved_chunks || [];
-  debugChunksEl.innerHTML = chunks.length
-    ? chunks.map(c => `
-        <div class="debug-item">
-          <div class="debug-item-top">
-            <strong>${escapeHtml(c.section_title || "Unknown")}</strong>
-            <span class="score-pill">${c.score ?? "–"}</span>
-          </div>
-          <div class="debug-item-meta">${escapeHtml(c.source_file || "n/a")}</div>
-          <div class="debug-item-preview">${escapeHtml(c.preview || "")}</div>
-        </div>`).join("")
-    : `<div class="debug-empty">Debug disabled or no chunks.</div>`;
-
-  debugContextEl.textContent = debug.context_preview || "Debug disabled.";
-}
-
-// ---------------------------------------------------------------------------
-// Transcript panel
-// ---------------------------------------------------------------------------
-function showTranscript(data) {
-  transcriptText.textContent = data.transcript || "";
-
-  if (data.normalized_query_en && data.normalized_query_en !== data.transcript) {
-    normalizedQuery.textContent = data.normalized_query_en;
-    queryRow.classList.remove("hidden");
-  } else {
-    queryRow.classList.add("hidden");
+  if (debugChunksEl) {
+    debugChunksEl.innerHTML = chunks.length
+      ? chunks.map(c => `
+          <div class="debug-item">
+            <div class="debug-item-top">
+              <strong>${escapeHtml(c.section_title || "Unknown")}</strong>
+              <span class="score-pill">${c.score ?? "–"}</span>
+            </div>
+            <div class="debug-item-meta">${escapeHtml(c.source_file || "n/a")}</div>
+            <div class="debug-item-preview">${escapeHtml(c.preview || "")}</div>
+          </div>`).join("")
+      : `<div class="debug-empty">Debug disabled or no chunks.</div>`;
   }
 
-  transcriptPanel.classList.remove("hidden");
-  transcriptPanel.classList.add("slide-in");
+  if (debugContextEl) {
+    debugContextEl.textContent = debug.context_preview || "Debug disabled.";
+  }
 }
 
-transcriptDismiss.addEventListener("click", () => {
-  transcriptPanel.classList.add("hidden");
-  transcriptPanel.classList.remove("slide-in");
-});
-
 // ---------------------------------------------------------------------------
-// Shared response renderer
+// Response Renderer (handles auto-speak if enabled)
 // ---------------------------------------------------------------------------
 function renderResponse(data, userText) {
   removeTypingIndicator();
@@ -500,36 +355,53 @@ function renderResponse(data, userText) {
 
   addMessage(data.answer || "No answer returned.", "bot", data.sources || [], meta);
   renderDebug(data);
+
+  // Auto-speak new bot reply if speaker toggle is ON
+  if (speakerEnabled && data.answer && window.useSpeech && window.useSpeech.ttsSupported) {
+    const langCode = data.language || langOverride.value || "en";
+    const bcpTag = BCP47_MAP[langCode] || langCode || "en-IN";
+    window.useSpeech.speak(data.answer, bcpTag);
+  }
 }
 
 // ---------------------------------------------------------------------------
-// TEXT submit flow
+// Send message pipeline (shared by text enter & voice auto-send)
 // ---------------------------------------------------------------------------
-form.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  if (isProcessing || isRecording) return;
+async function sendMessage() {
+  if (isProcessing) return;
+
+  // Stop STT listening if active
+  if (isListening && stopListeningFn) {
+    stopListeningFn();
+    stopListeningFn = null;
+  }
+  resetListeningUI();
+
   const message = input.value.trim();
   if (!message) return;
 
-  stopSpeaking();
+  if (window.useSpeech) {
+    window.useSpeech.stopSpeaking();
+  }
+
   isProcessing = true;
   addMessage(message, "user");
   input.value = "";
   setInputsDisabled(true);
   setStatus("Thinking…");
-  dbgStatus.textContent = "Running";
+  if (dbgStatus) dbgStatus.textContent = "Running";
 
   const typing = addTypingIndicator();
 
   try {
-    const selectedLang = langOverride.value || "en";
+    const selectedLang = langOverride ? (langOverride.value || "en") : "en";
     const res = await fetch("/ask", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         session_id: SESSION_ID,
         question:   message,
-        debug:      debugToggle.checked,
+        debug:      debugToggle ? debugToggle.checked : false,
         language:   selectedLang,
       }),
     });
@@ -539,258 +411,170 @@ form.addEventListener("submit", async (e) => {
     if (!res.ok) {
       removeTypingIndicator();
       addMessage(data.detail || data.error || "Request failed.", "bot");
+      setStatus("Error");
     } else {
       renderResponse(data, message);
     }
   } catch (err) {
     removeTypingIndicator();
     addMessage("Could not reach backend.", "bot");
-    dbgStatus.textContent = "Error";
+    if (dbgStatus) dbgStatus.textContent = "Error";
     console.error(err);
   } finally {
     isProcessing = false;
     setInputsDisabled(false);
-    input.focus();
+    if (input) input.focus();
     setStatus("Ready");
   }
+}
+
+form.addEventListener("submit", (e) => {
+  e.preventDefault();
+  sendMessage();
 });
 
 // ---------------------------------------------------------------------------
-// VOICE recording flow
+// Client-side STT (SpeechRecognition)
 // ---------------------------------------------------------------------------
-let mediaRecorder = null;
-let audioChunks   = [];
-let isRecording   = false;
-let isProcessing  = false;
-let micStream     = null;
-
-function cleanupMedia() {
-  if (micStream) {
-    micStream.getTracks().forEach((t) => {
-      try { t.stop(); } catch (_) {}
-    });
-    micStream = null;
+function resetListeningUI() {
+  isListening = false;
+  if (micBtn) {
+    micBtn.classList.remove("recording");
+    micBtn.setAttribute("aria-pressed", "false");
   }
-  mediaRecorder = null;
-  audioChunks = [];
-  isRecording = false;
-}
-
-async function startRecording() {
-  if (isRecording || isProcessing) return;
-
-  stopSpeaking();
-
-  try {
-    micStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
-    });
-  } catch (err) {
-    console.error("Microphone access denied:", err);
-    setStatus("Mic access denied");
-    addMessage("Microphone permission denied. Please allow microphone access in your browser.", "bot");
-    return;
-  }
-
-  // Guard against race conditions if state changed while awaiting user media
-  if (isRecording || isProcessing) {
-    cleanupMedia();
-    return;
-  }
-
-  audioChunks = [];
-
-  // Prefer webm/opus; fall back to supported browser formats
-  let mimeType = "";
-  if (MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) {
-    mimeType = "audio/webm;codecs=opus";
-  } else if (MediaRecorder.isTypeSupported("audio/webm")) {
-    mimeType = "audio/webm";
-  } else if (MediaRecorder.isTypeSupported("audio/ogg;codecs=opus")) {
-    mimeType = "audio/ogg;codecs=opus";
-  } else if (MediaRecorder.isTypeSupported("audio/mp4")) {
-    mimeType = "audio/mp4";
-  }
-
-  try {
-    mediaRecorder = new MediaRecorder(micStream, mimeType ? { mimeType } : {});
-  } catch (err) {
-    console.error("MediaRecorder initialization error:", err);
-    cleanupMedia();
-    setStatus("Mic error");
-    addMessage("Could not start audio recorder. Please try again.", "bot");
-    return;
-  }
-
-  mediaRecorder.ondataavailable = (e) => {
-    if (e.data && e.data.size > 0) {
-      audioChunks.push(e.data);
-    }
-  };
-
-  mediaRecorder.onstop = handleRecordingStop;
-  mediaRecorder.onerror = (e) => {
-    console.error("MediaRecorder error:", e);
-    stopRecording();
-  };
-
-  // Start recording without timeslice so the container header and metadata finalize cleanly on stop
-  mediaRecorder.start();
-  isRecording = true;
-
-  micBtn.classList.add("recording");
-  micBtn.setAttribute("aria-pressed", "true");
-  micPulse.classList.add("active");
-  setStatus("Recording… click again to stop");
-}
-
-async function stopRecording() {
-  if (!isRecording || !mediaRecorder) return;
-  isRecording = false;
-
-  micBtn.classList.remove("recording");
-  micBtn.setAttribute("aria-pressed", "false");
-  micPulse.classList.remove("active");
-  setStatus("Finishing recording…");
-
-  try {
-    if (mediaRecorder.state !== "inactive") {
-      mediaRecorder.stop();
-    }
-  } catch (err) {
-    console.error("Error stopping MediaRecorder:", err);
-    cleanupMedia();
-    setStatus("Ready");
+  if (micPulse) {
+    micPulse.classList.remove("active");
   }
 }
 
-async function handleRecordingStop() {
-  const mime = (mediaRecorder && mediaRecorder.mimeType) || "audio/webm";
-  const recordedChunks = [...audioChunks];
+function initSTT() {
+  if (!micBtn) return;
 
-  // Fully clean up mic stream and recorder references
-  cleanupMedia();
-
-  const blob = new Blob(recordedChunks, { type: mime });
-  console.log(`[Voice] Audio recording finalized: size=${blob.size} bytes, mimeType=${blob.type || mime}`);
-
-  // Reject empty or suspiciously tiny recordings (< 2 KB)
-  if (!blob || blob.size < 2048) {
-    console.warn(`[Voice] Rejected recording: ${blob ? blob.size : 0} bytes is under the 2 KB threshold.`);
-    setStatus("Ready");
-    setInputsDisabled(false);
-    addMessage("Recording was too short or empty. Please speak clearly while recording.", "bot");
+  if (!window.useSpeech || !window.useSpeech.sttSupported) {
+    micBtn.disabled = true;
+    micBtn.title = "Voice input not supported in this browser, try Chrome, Edge or Safari";
+    micBtn.setAttribute(
+      "aria-label",
+      "Voice input not supported in this browser, try Chrome, Edge or Safari"
+    );
     return;
   }
 
-  await sendVoiceBlob(blob, mime);
-}
+  micBtn.title = "Click to speak";
+  micBtn.setAttribute("aria-label", "Start voice input");
 
-async function sendVoiceBlob(blob, mime = "audio/webm") {
-  if (isProcessing) return;
-  isProcessing = true;
-  setInputsDisabled(true);
-  setStatus("Transcribing & generating answer…");
-  dbgStatus.textContent = "Transcribing + generating…";
+  micBtn.addEventListener("click", () => {
+    if (isProcessing) return;
 
-  const extension = mime.includes("ogg")
-    ? "recording.ogg"
-    : mime.includes("mp4")
-      ? "recording.mp4"
-      : "recording.webm";
-
-  const selectedLang = langOverride.value || "en";
-  const formData = new FormData();
-  formData.append("audio",      blob,        extension);
-  formData.append("session_id", SESSION_ID);
-  formData.append("debug",      debugToggle.checked ? "true" : "false");
-  formData.append("language",   selectedLang);
-
-  const typing = addTypingIndicator();
-
-  try {
-    const res = await fetch("/voice-ask", {
-      method: "POST",
-      body: formData,
-    });
-
-    const data = await res.json();
-
-    if (!res.ok) {
-      removeTypingIndicator();
-      addMessage(data.detail || "Voice request failed.", "bot");
-      setStatus("Error");
+    if (isListening) {
+      // User clicked while listening -> stop
+      if (stopListeningFn) {
+        stopListeningFn();
+        stopListeningFn = null;
+      }
+      resetListeningUI();
+      setStatus("Ready");
       return;
     }
 
-    // Show transcript panel
-    showTranscript(data);
+    // Start listening
+    if (window.useSpeech) {
+      window.useSpeech.stopSpeaking();
+    }
 
-    // Show user bubble with original transcript
-    addMessage(data.transcript, "voice");
+    isListening = true;
+    micBtn.classList.add("recording");
+    micBtn.setAttribute("aria-pressed", "true");
+    if (micPulse) micPulse.classList.add("active");
+    setStatus("Listening… speak clearly");
 
-    // Show answer
-    renderResponse(data, data.transcript);
+    const selectedLang = langOverride ? (langOverride.value || "en") : "en";
+    const bcpTag = BCP47_MAP[selectedLang] || selectedLang || "en-IN";
 
-  } catch (err) {
-    removeTypingIndicator();
-    addMessage("Could not reach backend.", "bot");
-    dbgStatus.textContent = "Error";
-    console.error("Voice request error:", err);
-  } finally {
-    isProcessing = false;
-    setInputsDisabled(false);
-    input.focus();
-    setStatus("Ready");
-  }
+    stopListeningFn = window.useSpeech.listen(
+      // onInterim: show live transcript in input box
+      (interimText) => {
+        if (input) {
+          input.value = interimText;
+        }
+      },
+      // onFinal: put final transcript in input box and auto-send via existing pipeline
+      (finalText) => {
+        resetListeningUI();
+        stopListeningFn = null;
+        if (finalText && finalText.trim()) {
+          if (input) input.value = finalText.trim();
+          sendMessage();
+        }
+      },
+      bcpTag,
+      {
+        onStart: () => {
+          setStatus("Listening… speak clearly");
+        },
+        onError: (err, type) => {
+          resetListeningUI();
+          stopListeningFn = null;
+          showTTSNotice(err.message || "Speech recognition error.");
+          setStatus("Ready");
+        },
+        onEnd: ({ hasSpeech }) => {
+          resetListeningUI();
+          stopListeningFn = null;
+          if (!isProcessing) {
+            setStatus("Ready");
+          }
+        },
+      }
+    );
+  });
 }
-
-// Toggle on click
-micBtn.addEventListener("click", () => {
-  if (isProcessing) return;
-  if (isRecording) {
-    stopRecording();
-  } else {
-    startRecording();
-  }
-});
 
 // ---------------------------------------------------------------------------
 // Reset
 // ---------------------------------------------------------------------------
 async function resetSession() {
-  stopSpeaking();
-  await fetch("/reset", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_id: SESSION_ID }),
-  });
+  if (window.useSpeech) {
+    window.useSpeech.stopSpeaking();
+  }
+  if (isListening && stopListeningFn) {
+    stopListeningFn();
+    stopListeningFn = null;
+    resetListeningUI();
+  }
+
+  try {
+    await fetch("/reset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: SESSION_ID }),
+    });
+  } catch (_) {}
 
   chat.innerHTML = "";
-  transcriptPanel.classList.add("hidden");
-  debugChunksEl.innerHTML = `<div class="debug-empty">No request yet.</div>`;
-  debugContextEl.textContent = "No request yet.";
-  dbgStatus.textContent   = "Reset";
-  dbgLang.textContent     = "–";
-  dbgQuery.textContent    = "–";
-  dbgScore.textContent    = "–";
-  dbgChunks.textContent   = "–";
-  dbgHistory.textContent  = "–";
-  dbgContext.textContent  = "–";
-  dbgSession.textContent  = "–";
+  if (transcriptPanel) transcriptPanel.classList.add("hidden");
+  if (debugChunksEl) debugChunksEl.innerHTML = `<div class="debug-empty">No request yet.</div>`;
+  if (debugContextEl) debugContextEl.textContent = "No request yet.";
+  if (dbgStatus)   dbgStatus.textContent   = "Reset";
+  if (dbgLang)     dbgLang.textContent     = "–";
+  if (dbgQuery)    dbgQuery.textContent    = "–";
+  if (dbgScore)    dbgScore.textContent    = "–";
+  if (dbgChunks)   dbgChunks.textContent   = "–";
+  if (dbgHistory)  dbgHistory.textContent  = "–";
+  if (dbgContext)  dbgContext.textContent  = "–";
+  if (dbgSession)  dbgSession.textContent  = "–";
   setRing(0);
   setStatus("Ready");
 }
 
-resetBtn.addEventListener("click", resetSession);
+if (resetBtn) {
+  resetBtn.addEventListener("click", resetSession);
+}
 
 // ---------------------------------------------------------------------------
-// Init
+// Initialization
 // ---------------------------------------------------------------------------
 setRing(0);
-debugChunksEl.innerHTML = `<div class="debug-empty">No request yet.</div>`;
-initTTS();
+if (debugChunksEl) debugChunksEl.innerHTML = `<div class="debug-empty">No request yet.</div>`;
+updateSpeakerToggleUI();
+initSTT();

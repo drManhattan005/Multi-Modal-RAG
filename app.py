@@ -9,9 +9,7 @@ Endpoints:
   GET  /           → index.html
   GET  /health     → status JSON
   POST /reset      → clear session history
-  POST /transcribe → audio bytes → transcript + lang
   POST /ask        → question + optional voice metadata → answer JSON
-  POST /voice-ask  → audio blob → full answer JSON (combined pipeline)
 """
 
 from __future__ import annotations
@@ -20,11 +18,9 @@ import os
 from collections import defaultdict
 from contextlib import asynccontextmanager
 
-import av
-import av.error
 import torch
 import uvicorn
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -32,18 +28,16 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
-from transformers import AutoModelForCausalLM, AutoTokenizer
+import httpx
+from dotenv import load_dotenv
 
-from normalizer import normalize_to_english
+load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Module-level singletons — populated inside lifespan(), used by route handlers
 # ---------------------------------------------------------------------------
 qdrant: QdrantClient | None = None
 embedder = None
-tokenizer = None
-llm = None
-_asr_transcribe = None
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -52,17 +46,21 @@ _asr_transcribe = None
 QDRANT_PATH = "qdrant_data"
 COLLECTION_NAME = "veloit_handbook_chunks"
 EMBED_MODEL_NAME = "intfloat/multilingual-e5-base"
-LLM_NAME = "utter-project/EuroLLM-1.7B-Instruct"
 MODEL_CACHE = "models"
+
+# Ollama LLM Configuration (single source of truth: .env with defaults)
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+LLM_MODEL = os.getenv("LLM_MODEL", "qwen2.5:1.5b")
+LLM_NUM_CTX = int(os.getenv("LLM_NUM_CTX", "2048"))
+LLM_NUM_THREAD = int(os.getenv("LLM_NUM_THREAD", "4"))
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
+LLM_NUM_PREDICT = int(os.getenv("LLM_NUM_PREDICT", "512"))
 
 MAX_HISTORY_TURNS = 6
 MAX_SESSION_CHARS = 10000
-MAX_CONTEXT_CHARS = 8000
+MAX_CONTEXT_CHARS = 4000
 MIN_RETRIEVAL_SCORE = 0.42
-RETRIEVAL_TOP_K = 5
-
-# Max audio upload size: 15 MB  (roughly 60 s of webm at 192 kbps)
-MAX_AUDIO_BYTES = 15 * 1024 * 1024
+RETRIEVAL_TOP_K = 3
 
 # ---------------------------------------------------------------------------
 # Device selection
@@ -86,7 +84,7 @@ print(f"[app] Compute device: {device}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global qdrant, embedder, tokenizer, llm, _asr_transcribe
+    global qdrant, embedder
 
     print("[app] Connecting to Qdrant…")
     qdrant = QdrantClient(path=QDRANT_PATH)
@@ -96,26 +94,35 @@ async def lifespan(app: FastAPI):
         EMBED_MODEL_NAME, cache_folder=MODEL_CACHE, device=device
     )
 
-    print("[app] Loading EuroLLM tokenizer…")
-    tokenizer = AutoTokenizer.from_pretrained(LLM_NAME, cache_dir=MODEL_CACHE)
+    # Startup health check for Ollama and required model
+    print(f"[app] Verifying Ollama connection at {OLLAMA_BASE_URL}…")
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
+            if resp.status_code == 200:
+                tags = resp.json().get("models", [])
+                pulled_models = [m.get("name", "") for m in tags]
+                found = any(
+                    name == LLM_MODEL or name == f"{LLM_MODEL}:latest" or name.startswith(f"{LLM_MODEL}:") or LLM_MODEL.startswith(name)
+                    for name in pulled_models
+                )
+                if found:
+                    print(f"[app] Ollama model '{LLM_MODEL}' verified successfully.")
+                else:
+                    print(
+                        f"[ERROR] Model '{LLM_MODEL}' is not pulled in Ollama.\n"
+                        f"Run: ollama pull {LLM_MODEL}"
+                    )
+            else:
+                print(f"[ERROR] Ollama returned HTTP {resp.status_code} at {OLLAMA_BASE_URL}.")
+    except Exception as exc:
+        print(
+            f"[ERROR] Could not connect to Ollama at {OLLAMA_BASE_URL} ({exc}).\n"
+            f"Ensure Ollama is running ('ollama serve') and model is pulled ('ollama pull {LLM_MODEL}')."
+        )
 
-    print("[app] Loading EuroLLM model…")
-    _llm = AutoModelForCausalLM.from_pretrained(
-        LLM_NAME,
-        cache_dir=MODEL_CACHE,
-        dtype=torch.float16,
-    )
-    _llm.to(device)
-    _llm.eval()
-    llm = _llm
-
-    print("[app] Loading ASR module (Faster-Whisper)…")
-    from asr import transcribe as _asr_fn
-    _asr_transcribe = _asr_fn
-
-    print("[app] All models loaded — server ready.")
+    print("[app] Embedder and pipeline ready — server ready.")
     yield
-    # Shutdown: nothing explicit needed; Python GC handles model cleanup.
     print("[app] Shutting down.")
 
 # ---------------------------------------------------------------------------
@@ -329,27 +336,29 @@ def generate_answer(
         messages.append({"role": item["role"], "content": item["content"]})
     messages.append({"role": "user", "content": prompt})
 
-    inputs = tokenizer.apply_chat_template(
-        messages,
-        add_generation_prompt=True,
-        tokenize=True,
-        return_dict=True,
-        return_tensors="pt",
-    ).to(device)
+    try:
+        with httpx.Client(timeout=60.0) as client:
+            resp = client.post(
+                f"{OLLAMA_BASE_URL}/api/chat",
+                json={
+                    "model": LLM_MODEL,
+                    "messages": messages,
+                    "stream": False,
+                    "options": {
+                        "num_ctx": LLM_NUM_CTX,
+                        "num_thread": LLM_NUM_THREAD,
+                        "temperature": LLM_TEMPERATURE,
+                        "num_predict": LLM_NUM_PREDICT,
+                    },
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            answer = data.get("message", {}).get("content", "").strip()
+    except Exception as exc:
+        print(f"[app] Error during Ollama generation: {exc}")
+        answer = "I could not generate an answer due to an error connecting to the language model."
 
-    with torch.no_grad():
-        outputs = llm.generate(
-            **inputs,
-            do_sample=False,
-            max_new_tokens= 250,
-            repetition_penalty=1.1,
-            pad_token_id=tokenizer.eos_token_id,
-        )
-
-    new_tokens = outputs[0][inputs["input_ids"].shape[-1]:]
-    answer = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
-
- 
     return answer
 
 
@@ -388,7 +397,6 @@ async def health():
         "status": "ok",
         "device": device,
         "session_mode": "single-process in-memory",
-        "asr": "faster-whisper",
     }
 
 
@@ -396,69 +404,6 @@ async def health():
 async def reset(body: ResetRequest):
     chat_memory[body.session_id] = []
     return {"ok": True, "session_id": body.session_id}
-
-
-@app.post("/transcribe")
-async def transcribe_audio(
-    audio: UploadFile = File(...),
-    language: str | None = Form(default=None),
-    preset_language: str | None = Form(default=None),
-    lang_override: str | None = Form(default=None),
-):
-    """
-    Accept a browser audio blob (webm/ogg/mp4) and return transcript + language.
-    """
-    selected_language = normalize_language(language or preset_language or lang_override)
-    audio_bytes = await audio.read()
-    filename = audio.filename or "recording"
-    content_type = audio.content_type or "unknown"
-    size_bytes = len(audio_bytes) if audio_bytes else 0
-
-    print(f"[transcribe] Received '{filename}' ({content_type}, {size_bytes} bytes), lang={selected_language}")
-
-    if not audio_bytes or size_bytes < 100:
-        print(f"[transcribe] Rejected: audio data empty or too small ({size_bytes} bytes)")
-        raise HTTPException(status_code=400, detail="No audio data received or audio too small.")
-
-    if size_bytes > MAX_AUDIO_BYTES:
-        print(f"[transcribe] Rejected: audio file exceeds limit ({size_bytes} bytes)")
-        raise HTTPException(
-            status_code=413,
-            detail=f"Audio too large. Maximum is {MAX_AUDIO_BYTES // 1024 // 1024} MB.",
-        )
-
-    try:
-        result = _asr_transcribe(
-            audio_bytes,
-            language=selected_language,
-        )
-    except (av.error.InvalidDataError, av.error.FFmpegError, av.AVError, ValueError) as exc:
-        print(f"[transcribe] Audio decode error for '{filename}': {exc}")
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid or corrupted audio upload. Please record again.",
-        )
-    except Exception as exc:
-        print(f"[transcribe] Unexpected ASR failure for '{filename}': {exc}")
-        raise HTTPException(
-            status_code=500,
-            detail="Speech recognition failed. Please try again.",
-        )
-
-    transcript = result.get("transcript", "").strip()
-
-    if not transcript:
-        print(f"[transcribe] Empty transcript returned for '{filename}'")
-        raise HTTPException(
-            status_code=422,
-            detail="Could not transcribe audio. Please speak clearly and try again.",
-        )
-
-    print(f"[transcribe] Success: [{selected_language}] '{transcript}'")
-    return {
-        "transcript": transcript,
-        "language": selected_language,
-    }
 
 
 @app.post("/ask")
@@ -542,95 +487,6 @@ async def ask(body: AskRequest):
         }
 
     return response
-
-
-@app.post("/voice-ask")
-async def voice_ask(
-    audio: UploadFile = File(...),
-    session_id: str = Form(default="default"),
-    language: str | None = Form(default=None),
-    preset_language: str | None = Form(default=None),
-    lang_override: str | None = Form(default=None),
-    debug: bool = Form(default=False),
-):
-    """
-    Combined single-call endpoint: audio blob → full answer JSON.
-
-    Pipeline:
-      1. Language selection (from dropdown / form field)
-      2. ASR with selected language (Faster-Whisper + VAD)
-      3. English normalization (EuroLLM, skipped if selected_language == "en")
-      4. Qdrant retrieval
-      5. Answer generation in selected language
-    """
-    selected_language = normalize_language(language or preset_language or lang_override)
-    audio_bytes = await audio.read()
-    filename = audio.filename or "recording"
-    content_type = audio.content_type or "unknown"
-    size_bytes = len(audio_bytes) if audio_bytes else 0
-
-    print(f"[voice-ask] Received '{filename}' ({content_type}, {size_bytes} bytes), lang={selected_language}")
-
-    if not audio_bytes or size_bytes < 100:
-        print(f"[voice-ask] Rejected: audio data empty or too small ({size_bytes} bytes)")
-        raise HTTPException(status_code=400, detail="No audio data received or audio too small.")
-
-    if size_bytes > MAX_AUDIO_BYTES:
-        print(f"[voice-ask] Rejected: audio file exceeds limit ({size_bytes} bytes)")
-        raise HTTPException(status_code=413, detail="Audio file too large.")
-
-    try:
-        asr_result = _asr_transcribe(audio_bytes, language=selected_language)
-    except (av.error.InvalidDataError, av.error.FFmpegError, av.AVError, ValueError) as exc:
-        print(f"[voice-ask] Audio decode error for '{filename}': {exc}")
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid or corrupted audio upload. Please record again.",
-        )
-    except Exception as exc:
-        print(f"[voice-ask] Unexpected ASR failure for '{filename}': {exc}")
-        raise HTTPException(
-            status_code=500,
-            detail="Speech recognition failed. Please try again.",
-        )
-
-    transcript = asr_result.get("transcript", "").strip()
-
-    if not transcript:
-        print(f"[voice-ask] Empty transcript returned for '{filename}'")
-        raise HTTPException(
-            status_code=422,
-            detail="Could not transcribe audio. Please speak clearly and try again.",
-        )
-
-    print(f"[voice-ask] Transcribed: [{selected_language}] '{transcript}'")
-
-    # Step 3: Normalize to English for retrieval
-    if selected_language == "en":
-        normalized_query_en = transcript
-    else:
-        normalized_query_en = normalize_to_english(
-            transcript=transcript,
-            detected_language=selected_language,
-            language_confidence=1.0,
-            tokenizer=tokenizer,
-            model=llm,
-            device=device,
-        )
-
-    # Step 4: Retrieve + Generate via /ask logic
-    ask_body = AskRequest(
-        question=transcript,
-        session_id=session_id,
-        debug=debug,
-        language=selected_language,
-        normalized_query_en=normalized_query_en,
-        transcript=transcript,
-    )
-
-    # Reuse the /ask handler logic directly
-    return await ask(ask_body)
-
 
 
 # ---------------------------------------------------------------------------
